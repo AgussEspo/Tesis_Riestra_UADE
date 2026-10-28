@@ -17,7 +17,7 @@ import agente_riestra as ag
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RUTA_EJEMPLO = os.path.join(AQUI, "datos_ejemplo", "Riestra_Tesis_Finanzas_V2.xlsx")
 RUTA_REGISTRO = os.path.join(AQUI, "registro_corridas.csv")
-RUTA_LOGO = os.path.join(AQUI, "assets", "escudo.png")
+CARPETA_ASSETS = os.path.join(AQUI, "assets")
 
 st.set_page_config(page_title="Agente Financiero | Riestra", page_icon="📊", layout="wide")
 
@@ -146,8 +146,12 @@ with st.sidebar:
         usar_ia = st.checkbox("Redactar análisis con IA (Claude)", value=hay_ia, disabled=not hay_ia)
         if not hay_ia:
             st.caption("Sin API key configurada: se usa el redactor automático.")
+        st.subheader("3. Escudo (opcional)")
+        escudo = st.file_uploader("Escudo del club (PNG o JPG)", type=["png", "jpg", "jpeg"],
+                                  help="Si no lo subís, se usa assets/escudo.png cuando existe.")
         generar = st.button("Generar informe", type="primary")
     else:
+        escudo = None
         generar = False
 
 # ----------------------------------------------------------------------------
@@ -170,7 +174,12 @@ if generar and datos is not None:
             carpeta = tempfile.mkdtemp()
             graficos = ag.generar_graficos(k, carpeta)
             ruta_pdf = os.path.join(carpeta, "informe.pdf")
-            ag.construir_pdf(k, a, ruta_pdf, RUTA_LOGO if os.path.exists(RUTA_LOGO) else None, origen, graficos)
+            logo = ag.buscar_logo(CARPETA_ASSETS)
+            if escudo is not None:  # el escudo subido en la sesión tiene prioridad
+                logo = os.path.join(carpeta, "escudo_subido" + os.path.splitext(escudo.name)[1].lower())
+                with open(logo, "wb") as f:
+                    f.write(escudo.getvalue())
+            ag.construir_pdf(k, a, ruta_pdf, logo, origen, graficos)
             with open(ruta_pdf, "rb") as f:
                 contenido_pdf = f.read()
             ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a, origen, info)
@@ -204,27 +213,28 @@ with tab_inf:
         m3.metric("Resultado", ag.ars_m(t["resultado"]))
         m4.metric("Margen", ag.pct(t["margen"]))
 
-        st.markdown("#### Resumen ejecutivo")
-        st.write(a["resumen"])
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("#### Puntos clave")
-            for x in a["puntos_clave"]:
-                st.markdown(f"- {x}")
-            st.markdown("#### Alertas")
-            for x in a["alertas"]:
-                st.markdown(f"- {x}")
-        with col_b:
-            st.markdown("#### Recomendaciones")
-            for x in a["recomendaciones"]:
-                st.markdown(f"- {x}")
-
-        st.markdown("#### Evolución mensual")
-        mostrar_imagen(inf["graficos"]["evolucion"][0])
-        st.markdown("#### Composición de ingresos y egresos")
+        st.markdown("### 1. Introducción")
+        st.write(a["introduccion"])
+        st.markdown("### 2. Desarrollo")
+        st.markdown("**2.1 Ingresos**")
+        st.write(a["ingresos"])
+        st.markdown("**2.2 Egresos**")
+        st.write(a["egresos"])
         mostrar_imagen(inf["graficos"]["composicion"][0])
-        st.markdown("#### Socios y cuota social")
+        st.markdown("**2.3 Resultado y evolución**")
+        st.write(a["resultado"])
+        mostrar_imagen(inf["graficos"]["evolucion"][0])
+        st.markdown("**2.4 Socios y cuota social**")
+        st.write(a["socios"])
         mostrar_imagen(inf["graficos"]["socios"][0])
+        st.markdown("**2.5 Puntos de atención**")
+        for x in a["alertas"]:
+            st.markdown(f"- {x}")
+        st.markdown("### 3. Cierre")
+        st.write(a["cierre"])
+        st.markdown("**Recomendaciones**")
+        for x in a["recomendaciones"]:
+            st.markdown(f"- {x}")
 
 with tab_datos:
     if not inf:

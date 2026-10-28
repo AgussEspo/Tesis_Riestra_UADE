@@ -69,6 +69,21 @@ GRIS_CLARO = colors.HexColor("#EFEFEF")
 VERDE = colors.HexColor("#1B7F4B")
 ROJO = colors.HexColor("#B3261E")
 HEX_NEGRO, HEX_GRIS, HEX_VERDE = "#111111", "#9A9A9A", "#1B7F4B"
+# Paleta de los gráficos (colores por rubro, consistentes entre informes)
+HEX_ING, HEX_EGR, HEX_RES = "#2F6DB5", "#E8833A", "#1B7F4B"
+HEX_COBRO, HEX_CUOTA = "#2E9E6B", "#7B5EA7"
+PALETA = ["#2F6DB5", "#2E9E6B", "#E8833A", "#7B5EA7", "#4FB3D9", "#D1495B", "#E9B44C", "#5C7080"]
+COLOR_CAT = {
+    "Sponsor": "#2F6DB5", "LPF": "#4FB3D9", "Entradas": "#2E9E6B", "Merchandising": "#E9B44C",
+    "Eventos": "#7B5EA7", "Cuota social": "#5C7080",
+    "Sueldos Jugadores": "#D1495B", "Cuerpo Tecnico": "#E8833A", "Servicios": "#E9B44C",
+    "Mantenimiento Cancha": "#2E9E6B", "Seguridad": "#7B5EA7", "Inferiores": "#4FB3D9", "Vestuarios": "#5C7080",
+}
+
+
+def color_cat(nombre, i):
+    return COLOR_CAT.get(nombre, PALETA[i % len(PALETA)])
+
 
 COLUMNAS = {
     "Socios": ["ID_Socio", "Estado", "Fecha_Alta"],
@@ -373,16 +388,43 @@ def calcular_kpis(datos, tipo, clave):
 # 3. ANÁLISIS (IA con respaldo local)
 # ----------------------------------------------------------------------------
 PROMPT_SISTEMA = (
-    "Sos analista financiero del Club Atlético Deportivo Riestra. Redactás para la "
-    "comisión directiva (lectores no técnicos). Usá EXCLUSIVAMENTE las cifras del JSON "
-    "recibido; no inventes datos ni hagas cálculos que no estén en el JSON. El campo "
-    "periodo.tipo indica si el informe es mensual, trimestral o anual; si hay "
-    "'comparacion', contrastá con ese período anterior. Montos en pesos argentinos. "
-    "Tono ejecutivo, claro y sobrio, español neutro. Respondé SOLO con un JSON válido, "
-    "sin texto extra ni bloques de código, con esta forma: "
-    '{"resumen": "3 a 4 oraciones", "puntos_clave": ["4 ítems"], '
-    '"alertas": ["2 a 4 ítems"], "recomendaciones": ["3 a 4 ítems accionables"]}'
+    "Sos analista financiero del Club Atlético Deportivo Riestra. Redactás un informe para la "
+    "comisión directiva (lectores no técnicos). Usá EXCLUSIVAMENTE las cifras del JSON recibido; "
+    "no inventes datos ni hagas cálculos que no estén en el JSON. El campo periodo.tipo indica si "
+    "el informe es mensual, trimestral o anual; si hay 'comparacion', contrastá con ese período anterior. "
+    "Montos en pesos argentinos (por ejemplo $ 224,2 M). Tono ejecutivo, claro y sobrio, español neutro. "
+    "El informe tiene tres partes: INTRODUCCIÓN, DESARROLLO y CIERRE. Cada texto es prosa corrida: "
+    "sin viñetas, sin markdown, sin asteriscos y sin títulos dentro del texto. "
+    "Respondé SOLO con un JSON válido, sin texto extra ni bloques de código, con exactamente estas claves: "
+    '{"introduccion": "2 a 3 oraciones: presenta el período, el alcance del informe y el resultado general", '
+    '"ingresos": "3 a 4 oraciones: total, rubros principales con su peso, concentración y variación vs período anterior", '
+    '"egresos": "3 a 4 oraciones: total, rubros de mayor peso y variación vs período anterior", '
+    '"resultado": "3 a 4 oraciones: resultado, margen, cobertura de egresos, evolución mensual y comparación", '
+    '"socios": "3 a 4 oraciones: padrón, morosidad, cuota social, cuota promedio y tasa de cobro", '
+    '"alertas": ["2 a 4 puntos de atención, una oración cada uno"], '
+    '"cierre": "2 a 3 oraciones: conclusión general, sin repetir la introducción", '
+    '"recomendaciones": ["3 a 4 acciones concretas, una oración cada una"]}'
 )
+
+CLAVES_TEXTO = ("introduccion", "ingresos", "egresos", "resultado", "socios", "cierre")
+CLAVES_LISTA = ("alertas", "recomendaciones")
+
+
+def _limpiar(txt):
+    """Quita restos de markdown que a veces agregan los modelos."""
+    return re.sub(r"\s+", " ", re.sub(r"[*_`#]+", "", str(txt))).strip()
+
+
+def _validar_analisis(a):
+    for c in CLAVES_TEXTO + CLAVES_LISTA:
+        if c not in a:
+            raise ValueError(f"Falta el campo {c}")
+    out = {c: _limpiar(a[c]) for c in CLAVES_TEXTO}
+    for c in CLAVES_LISTA:
+        if not isinstance(a[c], list) or not a[c]:
+            raise ValueError(f"El campo {c} debe ser una lista")
+        out[c] = [_limpiar(x) for x in a[c]]
+    return out
 
 
 def analisis_con_claude(k):
@@ -390,91 +432,110 @@ def analisis_con_claude(k):
     modelo = os.environ.get("CLAUDE_MODEL", MODELO_POR_DEFECTO)
     carga = {c: v for c, v in k.items() if c != "movimientos"}
     r = anthropic.Anthropic().messages.create(
-        model=modelo, max_tokens=1500, system=PROMPT_SISTEMA,
+        model=modelo, max_tokens=2500, system=PROMPT_SISTEMA,
         messages=[{"role": "user", "content": json.dumps(carga, ensure_ascii=False)}],
     )
     txt = "".join(b.text for b in r.content if b.type == "text")
     txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-    a = json.loads(txt)
-    for campo in ("resumen", "puntos_clave", "alertas", "recomendaciones"):
-        if campo not in a:
-            raise ValueError(f"Falta el campo {campo}")
+    a = _validar_analisis(json.loads(txt))
     return a, {"modelo": modelo, "tokens_in": r.usage.input_tokens, "tokens_out": r.usage.output_tokens}
+
+
+def _lista_y(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " y " + items[-1]
 
 
 def analisis_local(k):
     """Redactor de respaldo (sin IA): reglas fijas sobre los mismos indicadores."""
     t, s, c = k["totales"], k["socios"], k["comparacion"]
-    m, tend = k["mensual"], k["tendencia"]
+    m, tend, per = k["mensual"], k["tendencia"], k["periodo"]
     ic, ec = list(k["ingresos_cat"].items()), list(k["egresos_cat"].items())
     sup = t["resultado"] >= 0
+    ref = (c["etiqueta"].lower() if per["tipo"] == "mensual" else c["etiqueta"]) if c else ""
+    sube = lambda v: "crecieron" if v >= 0 else "cayeron"
 
-    res = (f"{_cap(k['periodo']['frase'])}, el club registró ingresos por {ars_m(t['ingresos'])} y egresos por "
-           f"{ars_m(t['egresos'])}, con un resultado {'superavitario' if sup else 'deficitario'} de "
-           f"{ars_m(abs(t['resultado']))} (margen de {pct(t['margen'])} sobre los ingresos). ")
+    intro = (f"El presente informe resume la situación económico-financiera de {CLUB} {per['frase']}. "
+             f"En ese lapso el club obtuvo ingresos por {ars_m(t['ingresos'])} y afrontó egresos por {ars_m(t['egresos'])}, "
+             f"lo que dejó un resultado {'superavitario' if sup else 'deficitario'} de {ars_m(abs(t['resultado']))}, "
+             f"equivalente a un margen de {pct(t['margen'])} sobre los ingresos.")
+
+    ing = (f"Los ingresos totales fueron de {ars_m(t['ingresos'])}. El rubro principal fue {ic[0][0]}, con {ars_m(ic[0][1])} "
+           f"({pct(ic[0][1] / t['ingresos'])} del total), seguido por {ic[1][0]} ({pct(ic[1][1] / t['ingresos'])})")
+    ing += (f" y {ic[2][0]} ({pct(ic[2][1] / t['ingresos'])}). " if len(ic) > 2 else ". ")
+    if ic[0][1] / t["ingresos"] >= 0.40:
+        ing += f"Esto implica una alta concentración de los ingresos en {ic[0][0]}. "
     if c:
-        ref = c["etiqueta"].lower() if k["periodo"]["tipo"] == "mensual" else c["etiqueta"]
-        res += (f"Respecto de {ref}, los ingresos {'crecieron' if c['var_ingresos'] >= 0 else 'cayeron'} "
-                f"{pct(abs(c['var_ingresos']))} y los egresos {'crecieron' if c['var_egresos'] >= 0 else 'cayeron'} "
-                f"{pct(abs(c['var_egresos']))}; el resultado pasó de {ars_m(c['resultado'])} a {ars_m(t['resultado'])}. ")
-    res += (f"La cuota social aportó {ars_m(s['recaudacion_cuotas'])} ({pct(s['cuotas_sobre_ingresos'])} de los "
-            f"ingresos) y hay {s['morosos']} socios morosos sobre un padrón de {s['total']}.")
+        ing += f"Respecto de {ref}, los ingresos {sube(c['var_ingresos'])} {pct(abs(c['var_ingresos']))}."
 
-    puntos = [
-        f"{ic[0][0]} es la principal fuente de ingresos: {ars_m(ic[0][1])} ({pct(ic[0][1] / t['ingresos'])} del total), "
-        f"seguida por {ic[1][0]} con {pct(ic[1][1] / t['ingresos'])}.",
-        f"El mayor egreso es {ec[0][0]}: {ars_m(ec[0][1])} ({pct(ec[0][1] / t['egresos'])} del gasto total).",
-    ]
+    egr = (f"Los egresos totales fueron de {ars_m(t['egresos'])}. El rubro de mayor peso fue {ec[0][0]}, con {ars_m(ec[0][1])} "
+           f"({pct(ec[0][1] / t['egresos'])} del gasto), seguido por {ec[1][0]} ({pct(ec[1][1] / t['egresos'])}). ")
+    if ec[0][1] / t["egresos"] >= 0.50:
+        egr += "La estructura de costos depende en buena medida de ese rubro. "
+    if c:
+        egr += f"Respecto de {ref}, los egresos {sube(c['var_egresos'])} {pct(abs(c['var_egresos']))}."
+
+    cob = str(round(t["ingresos"] / t["egresos"], 1)).replace(".", ",") if t["egresos"] else "-"
+    res = (f"El resultado del período fue {'positivo' if sup else 'negativo'} en {ars_m(abs(t['resultado']))}, con un margen de "
+           f"{pct(t['margen'])}. Los ingresos cubrieron {cob} veces los egresos. ")
     if len(m) > 1:
         mejor, peor = max(m, key=lambda x: x["resultado"]), min(m, key=lambda x: x["resultado"])
-        puntos.append(f"El mejor resultado mensual fue en {mejor['nombre']} ({ars_m(mejor['resultado'])}) y el más "
-                      f"bajo en {peor['nombre']} ({ars_m(peor['resultado'])}).")
-    else:
-        cob = t["ingresos"] / t["egresos"] if t["egresos"] else 0
-        puntos.append(f"Los ingresos del mes cubrieron {str(round(cob, 1)).replace('.', ',')} veces los egresos.")
+        res += (f"El mejor mes fue {mejor['nombre']} ({ars_m(mejor['resultado'])}) y el de menor resultado fue "
+                f"{peor['nombre']} ({ars_m(peor['resultado'])}). ")
+    if c:
+        res += f"En comparación con {ref}, el resultado pasó de {ars_m(c['resultado'])} a {ars_m(t['resultado'])}."
+
+    soc = (f"El padrón cuenta con {s['total']} socios: {s['activos']} activos y {s['morosos']} morosos "
+           f"({pct(s['tasa_morosidad'], 0)} del padrón). La recaudación por cuota social fue de {ars_m(s['recaudacion_cuotas'])}, "
+           f"el {pct(s['cuotas_sobre_ingresos'])} de los ingresos. ")
     ini, fin = tend[0], tend[-1]
     if len(tend) > 1 and ini["cuota_prom"]:
         v = fin["cuota_prom"] / ini["cuota_prom"] - 1
-        puntos.append(f"La cuota promedio pasó de {ars(ini['cuota_prom'])} en {ini['nombre']} a {ars(fin['cuota_prom'])} "
-                      f"en {fin['nombre']} ({signo_pct(v)}); en el período abonó en promedio el "
-                      f"{pct(s['tasa_cobro_promedio'], 0)} de los socios por mes.")
+        soc += (f"La cuota promedio pasó de {ars(ini['cuota_prom'])} en {ini['nombre']} a {ars(fin['cuota_prom'])} en "
+                f"{fin['nombre']} ({signo_pct(v)}), y en promedio abonó el {pct(s['tasa_cobro_promedio'], 0)} de los socios por mes.")
     else:
-        puntos.append(f"La cuota promedio fue de {ars(s['cuota_promedio'])}; abonó el "
-                      f"{pct(s['tasa_cobro_promedio'], 0)} de los socios.")
+        soc += f"La cuota promedio fue de {ars(s['cuota_promedio'])} y abonó el {pct(s['tasa_cobro_promedio'], 0)} de los socios."
 
-    alertas = []
+    alertas, temas = [], []
     if ic[0][1] / t["ingresos"] >= 0.40:
-        alertas.append(f"Alta concentración de ingresos: {ic[0][0]} explica el {pct(ic[0][1] / t['ingresos'])} del total. "
-                       f"Una baja o demora en ese rubro impactaría de forma directa en el resultado.")
+        alertas.append(f"Alta concentración de ingresos: {ic[0][0]} explica el {pct(ic[0][1] / t['ingresos'])} del total y una baja "
+                       f"o demora en ese rubro impactaría de forma directa en el resultado.")
+        temas.append(f"la dependencia de {ic[0][0]}")
     if ec[0][1] / t["egresos"] >= 0.50:
-        alertas.append(f"{ec[0][0]} concentra el {pct(ec[0][1] / t['egresos'])} del gasto: la estructura de costos es poco flexible.")
+        alertas.append(f"{ec[0][0]} concentra el {pct(ec[0][1] / t['egresos'])} del gasto, lo que vuelve poco flexible la estructura de costos.")
+        temas.append(f"el peso de {ec[0][0]} en el gasto")
     if c and c["var_egresos"] > c["var_ingresos"] and c["var_egresos"] > 0:
-        alertas.append(f"Los egresos crecen más rápido que los ingresos respecto de {c['etiqueta']} "
-                       f"({signo_pct(c['var_egresos'])} vs {signo_pct(c['var_ingresos'])}).")
+        alertas.append(f"Los egresos crecen más rápido que los ingresos respecto de {ref} ({signo_pct(c['var_egresos'])} vs {signo_pct(c['var_ingresos'])}).")
+        temas.append("el ritmo de crecimiento de los egresos")
     if s["tasa_morosidad"] >= 0.10:
-        alertas.append(f"Morosidad de {pct(s['tasa_morosidad'], 0)} ({s['morosos']} de {s['total']} socios).")
+        alertas.append(f"La morosidad alcanza el {pct(s['tasa_morosidad'], 0)} del padrón ({s['morosos']} de {s['total']} socios).")
+        temas.append("la morosidad de socios")
     if s["cuotas_sobre_ingresos"] < 0.05:
-        alertas.append(f"La cuota social cubre solo el {pct(s['cuotas_sobre_egresos'])} de los egresos: el club depende "
-                       f"de ingresos no societarios.")
+        alertas.append(f"La cuota social cubre solo el {pct(s['cuotas_sobre_egresos'])} de los egresos, por lo que el club depende de ingresos no societarios.")
+        temas.append("el bajo aporte de la cuota social")
     neg = [x["nombre"] for x in m if x["resultado"] < 0]
     if neg:
         alertas.append("Meses con resultado negativo: " + ", ".join(neg) + ".")
+        temas.append("los meses con resultado negativo")
     if not alertas:
         alertas.append("No se detectan alertas relevantes con los criterios definidos.")
 
+    cierre = (f"En síntesis, el club cerró {per['frase']} con un resultado {'superavitario' if sup else 'deficitario'}"
+              f"{', sostenido principalmente por ' + ic[0][0] if sup else ''}. ")
+    cierre += (f"Los principales aspectos a monitorear son {_lista_y(temas[:4])}, de modo de sostener este desempeño en los próximos períodos."
+               if temas else "No se identifican riesgos relevantes, por lo que se recomienda mantener el seguimiento periódico.")
+
     reco = []
     if ic[0][1] / t["ingresos"] >= 0.40:
-        reco.append(f"Diversificar ingresos: ampliar entradas, merchandising y alquiler de espacios para reducir la "
-                    f"dependencia de {ic[0][0]}.")
+        reco.append(f"Diversificar ingresos: ampliar entradas, merchandising y alquiler de espacios para reducir la dependencia de {ic[0][0]}.")
     if s["tasa_morosidad"] >= 0.10:
         reco.append("Implementar un plan de regularización para socios morosos (recordatorios, planes de pago y débito automático).")
     if s["cuotas_sobre_ingresos"] < 0.05:
-        reco.append("Revisar la política de cuota social y de captación de socios para que aporte una proporción mayor "
-                    "al financiamiento del club.")
+        reco.append("Revisar la política de cuota social y de captación de socios para que aporte una proporción mayor al financiamiento del club.")
     reco.append("Destinar parte del superávit a un fondo de reserva y a inversión en infraestructura e inferiores."
                 if sup else "Definir un plan de reducción de gastos y refuerzo de ingresos para revertir el déficit.")
     reco.append("Repetir este reporte periódicamente para monitorear la evolución de los indicadores.")
-    return {"resumen": res, "puntos_clave": puntos, "alertas": alertas, "recomendaciones": reco}
+    return {"introduccion": intro, "ingresos": ing, "egresos": egr, "resultado": res, "socios": soc,
+            "alertas": alertas, "cierre": cierre, "recomendaciones": reco}
 
 
 def generar_analisis(k, usar_ia=True):
@@ -508,9 +569,9 @@ def grafico_evolucion(k, ruta):
     al = [1.0 if v["en_periodo"] else 0.35 for v in t]
     primero = next(i for i in x if t[i]["en_periodo"])
     for i in x:
-        ax.bar(i - w / 2, t[i]["ingresos"] / 1e6, w, color=HEX_NEGRO, alpha=al[i], label="Ingresos" if i == primero else None)
-        ax.bar(i + w / 2, t[i]["egresos"] / 1e6, w, color=HEX_GRIS, alpha=al[i], label="Egresos" if i == primero else None)
-    ax.plot(x, [v["resultado"] / 1e6 for v in t], color=HEX_VERDE, marker="o", markersize=4, linewidth=1.8, label="Resultado")
+        ax.bar(i - w / 2, t[i]["ingresos"] / 1e6, w, color=HEX_ING, alpha=al[i], label="Ingresos" if i == primero else None)
+        ax.bar(i + w / 2, t[i]["egresos"] / 1e6, w, color=HEX_EGR, alpha=al[i], label="Egresos" if i == primero else None)
+    ax.plot(x, [v["resultado"] / 1e6 for v in t], color=HEX_RES, marker="o", markersize=4.5, linewidth=2, label="Resultado")
     ax.set_xticks(x)
     ax.set_xticklabels([v["etiqueta"] for v in t], fontsize=7 if len(t) > 9 else 7.5)
     ax.set_ylabel("Millones de $", fontsize=8, color="#444444")
@@ -524,14 +585,16 @@ def grafico_evolucion(k, ruta):
 
 def grafico_composicion(k, ruta):
     fig, axs = plt.subplots(1, 2, figsize=(7.1, 3.0), dpi=200)
-    for ax, datos, titulo, color in ((axs[0], k["ingresos_cat"], "Ingresos por rubro", HEX_NEGRO),
-                                      (axs[1], k["egresos_cat"], "Egresos por rubro", HEX_GRIS)):
+    for ax, datos, titulo in ((axs[0], k["ingresos_cat"], "Ingresos por rubro"),
+                              (axs[1], k["egresos_cat"], "Egresos por rubro")):
         total = sum(datos.values())
-        nombres = list(datos.keys())[::-1]
-        valores = [datos[n] / 1e6 for n in nombres]
-        ax.barh(nombres, valores, color=color, height=0.62)
+        nombres = list(datos.keys())
+        orden = nombres[::-1]
+        valores = [datos[n] / 1e6 for n in orden]
+        cols = [color_cat(n, nombres.index(n)) for n in orden]
+        ax.barh(orden, valores, color=cols, height=0.62)
         mx = max(valores)
-        for i, n in enumerate(nombres):
+        for i, n in enumerate(orden):
             ax.text(valores[i] + mx * 0.02, i, pct(datos[n] / total, 0), va="center", fontsize=7.5, color="#222222")
         ax.set_xlim(0, mx * 1.2)
         ax.set_title(titulo, fontsize=9, fontweight="bold", loc="left", color="#111111")
@@ -554,7 +617,7 @@ def grafico_socios(k, ruta):
     ax = axs[0]
     vals = [v["tasa_cobro"] * 100 for v in t]
     for i in x:
-        ax.bar(i, vals[i], color=HEX_NEGRO, width=0.6, alpha=1.0 if t[i]["en_periodo"] else 0.35)
+        ax.bar(i, vals[i], color=HEX_COBRO, width=0.6, alpha=1.0 if t[i]["en_periodo"] else 0.35)
         ax.text(i, vals[i] + 1, f"{vals[i]:.0f}%", ha="center", fontsize=7, color="#222222")
     ax.set_ylim(0, 105)
     ax.set_xticks(x)
@@ -562,7 +625,7 @@ def grafico_socios(k, ruta):
     ax.set_title("Socios que pagaron la cuota (%)", fontsize=9, fontweight="bold", loc="left")
     _estilo_ejes(ax)
     ax = axs[1]
-    ax.plot(x, [v["cuota_prom"] / 1000 for v in t], color=HEX_NEGRO, marker="o", markersize=4, linewidth=1.8)
+    ax.plot(x, [v["cuota_prom"] / 1000 for v in t], color=HEX_CUOTA, marker="o", markersize=4.5, linewidth=2)
     ax.set_xticks(x)
     ax.set_xticklabels(etiq, fontsize=7)
     ax.set_title("Cuota promedio abonada (miles de $)", fontsize=9, fontweight="bold", loc="left")
@@ -583,6 +646,15 @@ def generar_graficos(k, carpeta):
     return out
 
 
+def buscar_logo(carpeta):
+    """Devuelve la ruta del escudo (escudo.png/jpg/jpeg) dentro de `carpeta`, o None."""
+    for nombre in ("escudo.png", "escudo.jpg", "escudo.jpeg", "Escudo.png", "Escudo.jpg"):
+        ruta = os.path.join(carpeta, nombre)
+        if os.path.exists(ruta):
+            return ruta
+    return None
+
+
 def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=None):
     W, H = A4
     mg = 1.8 * cm
@@ -590,8 +662,9 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
     graficos = graficos or generar_graficos(k, tempfile.mkdtemp())
 
     base = ParagraphStyle("base", fontName="Helvetica", fontSize=9.5, leading=13.5, textColor=NEGRO)
-    cuerpo = ParagraphStyle("cuerpo", parent=base, alignment=TA_JUSTIFY)
+    cuerpo = ParagraphStyle("cuerpo", parent=base, alignment=TA_JUSTIFY, spaceAfter=2)
     h = ParagraphStyle("h", parent=base, fontName="Helvetica-Bold", fontSize=12.5, leading=15, spaceBefore=12, spaceAfter=3)
+    sub_st = ParagraphStyle("sub", parent=base, fontName="Helvetica-Bold", fontSize=10.5, leading=13, spaceBefore=9, spaceAfter=2)
     peq = ParagraphStyle("peq", parent=base, fontSize=7.5, leading=10, textColor=GRIS)
     vineta = ParagraphStyle("vi", parent=base, leftIndent=12, bulletIndent=0, spaceAfter=3.5)
     nota = ParagraphStyle("nota", parent=base, fontSize=8, leading=11, textColor=GRIS, leftIndent=10, bulletIndent=0, spaceAfter=2)
@@ -600,10 +673,27 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
     def seccion(titulo):
         return [Paragraph(titulo.upper(), h), HRFlowable(width="100%", thickness=1.4, color=NEGRO, spaceAfter=6)]
 
+    def subtitulo(titulo):
+        return Paragraph(titulo, sub_st)
+
+    def bloque(titulo, texto):
+        return KeepTogether([subtitulo(titulo), Paragraph(escape(texto), cuerpo)])
+
     def bullets(items, estilo=vineta):
         return [Paragraph(escape(x), estilo, bulletText="\u2022") for x in items]
 
     tipo_txt = {"mensual": "Informe mensual", "trimestral": "Informe trimestral", "anual": "Informe anual"}[k["periodo"]["tipo"]]
+
+    def pegar_escudo(c, x, y, lado):
+        """Dibuja el escudo sobre un fondo blanco para que se vea bien en el encabezado negro."""
+        try:
+            pad = 0.12 * cm
+            c.setFillColor(colors.white)
+            c.roundRect(x - pad, y - pad, lado + 2 * pad, lado + 2 * pad, 0.25 * cm, stroke=0, fill=1)
+            c.drawImage(logo, x, y, lado, lado, mask="auto", preserveAspectRatio=True, anchor="c")
+            return True
+        except Exception:
+            return False  # un escudo inválido nunca debe romper el informe
 
     def dibujar(c, doc, grande):
         alto = 4.2 * cm if grande else 1.7 * cm
@@ -619,9 +709,9 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
         c.setFillAlpha(1)
         x_txt = mg
         if logo and os.path.exists(logo):
-            lado = alto - 1.0 * cm
-            c.drawImage(logo, mg, H - alto + 0.5 * cm, lado, lado, mask="auto", preserveAspectRatio=True)
-            x_txt = mg + lado + 0.5 * cm
+            lado = 2.6 * cm if grande else 1.0 * cm
+            if pegar_escudo(c, mg + 0.12 * cm, H - alto + (alto - lado) / 2, lado):
+                x_txt = mg + lado + (0.7 if grande else 0.55) * cm
         if grande:
             c.setFont("Helvetica", 8.5)
             c.setFillColor(GRIS_MEDIO)
@@ -683,7 +773,6 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
         ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
 
-    # detalle: tabla mensual (trimestral/anual) o movimientos (mensual)
     def tabla_mensual():
         filas = [["Mes", "Ingresos", "Egresos", "Resultado", "Margen"]]
         for v in m:
@@ -698,7 +787,7 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
         for i, v in enumerate(m + [{"resultado": t["resultado"]}], start=1):
             est.append(("TEXTCOLOR", (3, i), (3, i), VERDE if v["resultado"] >= 0 else ROJO))
         tb.setStyle(TableStyle(est))
-        return seccion("Detalle mensual") + [tb]
+        return KeepTogether([subtitulo("Detalle mensual"), tb])
 
     def tabla_movimientos(titulo, lista, total):
         filas = [["Fecha", "Rubro", "Descripción", "Monto"]]
@@ -713,9 +802,8 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
             ("ALIGN", (3, 0), (3, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, GRIS_CLARO])]))
-        return seccion(titulo) + [tb]
+        return KeepTogether([subtitulo(titulo), tb])
 
-    # socios
     def mini(titulo, valor, sub=""):
         return [Paragraph(titulo.upper(), ParagraphStyle("mt", parent=peq, fontName="Helvetica-Bold")),
                 Paragraph(valor, ParagraphStyle("mv", parent=base, fontName="Helvetica-Bold", fontSize=13, leading=17)),
@@ -753,22 +841,23 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
     notas.append("Análisis redactado por IA (Claude) a partir de los indicadores calculados."
                  if origen_analisis == "ia" else "Análisis redactado con reglas automáticas a partir de los indicadores calculados.")
 
+    # ---- armado: 1. Introducción | 2. Desarrollo | 3. Cierre
     story = [NextPageTemplate("resto"), Spacer(1, 0.2 * cm), kpis]
-    story += seccion("Resumen ejecutivo") + [Paragraph(escape(a["resumen"]), cuerpo)]
-    story += seccion("Puntos clave") + bullets(a["puntos_clave"])
-    story.append(KeepTogether(seccion("Evolución mensual") + [img("evolucion")]))
-    story.append(PageBreak())
-    story.append(KeepTogether(seccion("Composición de ingresos y egresos") + [img("composicion")]))
+    story += seccion("1. Introducción") + [Paragraph(escape(a["introduccion"]), cuerpo)]
+
+    story += seccion("2. Desarrollo")
+    story += [bloque("2.1 Ingresos", a["ingresos"]), bloque("2.2 Egresos", a["egresos"]), Spacer(1, 4), img("composicion")]
+    story += [KeepTogether([subtitulo("2.3 Resultado y evolución"), Paragraph(escape(a["resultado"]), cuerpo), Spacer(1, 4), img("evolucion")]), Spacer(1, 6)]
     if "movimientos" in k:
-        story.append(KeepTogether(tabla_movimientos("Detalle de ingresos del mes", k["movimientos"]["ingresos"], t["ingresos"])))
-        story.append(Spacer(1, 6))
-        story.append(KeepTogether(tabla_movimientos("Detalle de egresos del mes", k["movimientos"]["egresos"], t["egresos"])))
+        story += [tabla_movimientos("Ingresos del mes", k["movimientos"]["ingresos"], t["ingresos"]), Spacer(1, 6),
+                  tabla_movimientos("Egresos del mes", k["movimientos"]["egresos"], t["egresos"])]
     else:
-        story.append(KeepTogether(tabla_mensual()))
-    story.append(PageBreak())
-    story += seccion("Socios y cuota social") + [Spacer(1, 2), socios_t, Spacer(1, 6), img("socios")]
-    story.append(KeepTogether(seccion("Alertas") + bullets(a["alertas"])))
-    story.append(KeepTogether(seccion("Recomendaciones") + bullets(a["recomendaciones"])))
+        story += [tabla_mensual()]
+    story += [bloque("2.4 Socios y cuota social", a["socios"]), Spacer(1, 4), socios_t, Spacer(1, 6), img("socios")]
+    story.append(KeepTogether([subtitulo("2.5 Puntos de atención")] + bullets(a["alertas"])))
+
+    story += seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
+    story.append(KeepTogether([subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])))
     story.append(Spacer(1, 8))
     story += [Paragraph("<b>Notas metodológicas</b>", peq)] + bullets(notas, nota)
     doc.build(story)
@@ -789,7 +878,7 @@ def registrar_corrida(ruta, fuente, k, a, origen, info):
         "ingresos": k["totales"]["ingresos"], "egresos": k["totales"]["egresos"], "resultado": k["totales"]["resultado"],
         "origen_analisis": origen, "modelo": (info or {}).get("modelo", ""),
         "tokens_in": (info or {}).get("tokens_in", ""), "tokens_out": (info or {}).get("tokens_out", ""),
-        "resumen": a["resumen"],
+        "resumen": a["introduccion"],
     }
     nuevo = not os.path.exists(ruta)
     try:
@@ -829,7 +918,7 @@ def main():
     a, origen, info = generar_analisis(k, usar_ia=not args.sin_ia)
     if info.get("aviso"):
         print("[aviso]", info["aviso"])
-    construir_pdf(k, a, args.salida, args.logo, origen)
+    construir_pdf(k, a, args.salida, args.logo or buscar_logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")), origen)
     registrar_corrida(args.registro, args.fuente, k, a, origen, info)
     print(f"Reporte generado: {args.salida}  ({k['periodo']['etiqueta']}, análisis: {origen})")
 
