@@ -13,10 +13,12 @@ import pandas as pd
 import streamlit as st
 
 import agente_riestra as ag
+import consultas as co
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RUTA_EJEMPLO = os.path.join(AQUI, "datos_ejemplo", "Riestra_Tesis_Finanzas_V2.xlsx")
 RUTA_REGISTRO = os.path.join(AQUI, "registro_corridas.csv")
+RUTA_CONSULTAS = os.path.join(AQUI, "registro_consultas.csv")
 CARPETA_ASSETS = os.path.join(AQUI, "assets")
 
 st.set_page_config(page_title="Agente Financiero | Riestra", page_icon="📊", layout="wide")
@@ -48,8 +50,8 @@ def leer_url(url):
 
 
 @st.cache_data(show_spinner=False)
-def leer_archivo(contenido):
-    return ag.cargar_excel(io.BytesIO(contenido))
+def leer_archivos(items):
+    return ag.cargar_archivos(list(items))
 
 
 @st.cache_data(show_spinner=False)
@@ -89,6 +91,7 @@ if api_key:
     os.environ["ANTHROPIC_API_KEY"] = str(api_key)
 hay_ia = bool(os.environ.get("ANTHROPIC_API_KEY"))
 max_ia = int(secreto("MAX_IA_POR_SESION", 10))
+max_consultas = int(secreto("MAX_CONSULTAS_POR_SESION", 15))
 st.session_state.setdefault("ia_usos", 0)
 
 # ----------------------------------------------------------------------------
@@ -96,13 +99,15 @@ st.session_state.setdefault("ia_usos", 0)
 # ----------------------------------------------------------------------------
 with st.sidebar:
     st.subheader("1. Datos")
-    fuente = st.radio("Fuente", ["Datos de ejemplo", "Enlace (Google Sheets / OneDrive)", "Subir archivo Excel"])
+    fuente = st.radio("Fuente", ["Datos de ejemplo", "Enlace (Google Sheets / OneDrive)", "Subir archivo (Excel o CSV)"])
     url = archivo = None
     if fuente.startswith("Enlace"):
         url = st.text_input("Enlace del archivo", value=str(secreto("URL_DATOS_DEFAULT")),
                             help="Debe estar compartido como 'Cualquier persona con el enlace puede ver'.")
     elif fuente.startswith("Subir"):
-        archivo = st.file_uploader("Archivo .xlsx", type=["xlsx"])
+        archivo = st.file_uploader("Archivos", type=["xlsx", "csv"], accept_multiple_files=True,
+                                   help="Un Excel con las 4 pestañas, o 4 archivos CSV: socios, pagos, ingresos y egresos "
+                                        "(el nombre de cada archivo debe incluir esa palabra).")
 
     if st.button("Cargar datos"):
         try:
@@ -116,11 +121,13 @@ with st.sidebar:
                 datos, etiqueta = leer_url(url.strip()), url.strip()
                 st.session_state["ultima_url"] = url
             else:
-                if archivo is None:
-                    raise ValueError("Subí un archivo .xlsx.")
-                datos, etiqueta = leer_archivo(archivo.getvalue()), f"archivo: {archivo.name}"
+                if not archivo:
+                    raise ValueError("Subí un Excel (.xlsx) o los 4 archivos CSV.")
+                datos = leer_archivos(tuple((a.name, a.getvalue()) for a in archivo))
+                etiqueta = "archivo: " + ", ".join(a.name for a in archivo)
             st.session_state["datos"], st.session_state["fuente_txt"] = datos, etiqueta
             st.session_state.pop("informe", None)
+            st.session_state.pop("chat", None)
             st.success("Datos cargados.")
         except ValueError as e:
             st.error(str(e))
@@ -192,7 +199,7 @@ if generar and datos is not None:
 # Resultado
 # ----------------------------------------------------------------------------
 inf = st.session_state.get("informe")
-tab_inf, tab_datos, tab_reg = st.tabs(["Informe", "Datos y calidad", "Registro de corridas"])
+tab_inf, tab_socios, tab_cons, tab_datos, tab_reg = st.tabs(["Informe", "Socios", "Consultas", "Datos y calidad", "Registro"])
 
 with tab_inf:
     if not inf:
@@ -224,10 +231,27 @@ with tab_inf:
         st.markdown("**2.3 Resultado y evolución**")
         st.write(a["resultado"])
         mostrar_imagen(inf["graficos"]["evolucion"][0])
-        st.markdown("**2.4 Socios y cuota social**")
+        st.markdown("**2.4 Movimientos extraordinarios**")
+        st.write(a["extraordinarios"])
+        xs = k["extraordinarios"]
+        if xs["cantidad"]:
+            st.dataframe(pd.DataFrame(xs["ingresos"] + xs["egresos"])[["fecha", "tipo", "rubro", "descripcion", "monto", "motivo"]]
+                         .rename(columns=str.capitalize), hide_index=True)
+            e1, e2, e3 = st.columns(3)
+            e1.metric("Resultado del período", ag.ars_m(t["resultado"]))
+            e2.metric("Efecto de extraordinarios", ag.ars_m(xs["neto"]))
+            e3.metric("Resultado sin extraordinarios", ag.ars_m(xs["resultado_ordinario"]))
+        st.markdown("**2.5 Socios y cuota social**")
         st.write(a["socios"])
         mostrar_imagen(inf["graficos"]["socios"][0])
-        st.markdown("**2.5 Puntos de atención**")
+        dd = k["deudores"]
+        st.markdown(f"**2.6 Los {len(dd['top'])} mayores deudores**")
+        st.write(a["deudores"])
+        if dd["top"]:
+            st.dataframe(pd.DataFrame([{"#": r["puesto"], "Socio": f"{r['socio']} (N° {r['id']})", "Estado": r["estado"],
+                                        "Meses impagos": r["meses_impagos"], "Deuda estimada": r["deuda"],
+                                        "Último pago": r["ultimo_pago"]} for r in dd["top"]]), hide_index=True)
+        st.markdown("**2.7 Puntos de atención**")
         for x in a["alertas"]:
             st.markdown(f"- {x}")
         st.markdown("### 3. Cierre")
@@ -235,6 +259,83 @@ with tab_inf:
         st.markdown("**Recomendaciones**")
         for x in a["recomendaciones"]:
             st.markdown(f"- {x}")
+
+with tab_socios:
+    if datos is None:
+        st.info("Cargá los datos para ver el estado de cuenta de los socios.")
+    else:
+        hasta_s = pd.Timestamp(inf["k"]["periodo"]["hasta"]) if inf else ag.rango_datos(datos)[1]
+        cuenta = ag.estado_cuenta_socios(datos, hasta_s)
+        con_deuda = cuenta[cuenta["Deuda_estimada"] > 0]
+        st.caption(f"Estado de cuenta de **todos** los socios al {hasta_s:%d/%m/%Y}. Deuda estimada = meses sin pago por la "
+                   "cuota promedio del club ese mes (no es una deuda contable).")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Socios", len(cuenta))
+        s2.metric("Con cuotas impagas", len(con_deuda))
+        s3.metric("Deuda estimada total", ag.ars(int(cuenta["Deuda_estimada"].sum())))
+        tot_s = cuenta["Deuda_estimada"].sum()
+        s4.metric("Peso de los 5 mayores", ag.pct(con_deuda.head(5)["Deuda_estimada"].sum() / tot_s) if tot_s else "-")
+
+        def vista(df):
+            v = df.copy()
+            v["Fecha_Alta"] = v["Fecha_Alta"].dt.strftime("%d/%m/%Y")
+            v["Ultimo_pago"] = v["Ultimo_pago"].dt.strftime("%d/%m/%Y").fillna("sin pagos")
+            return v.rename(columns={"Fecha_Alta": "Alta", "Meses_esperados": "Meses esperados", "Meses_pagados": "Meses pagados",
+                                     "Meses_impagos": "Meses impagos", "Deuda_estimada": "Deuda estimada", "Detalle_impagos": "Detalle impagos",
+                                     "Ultimo_pago": "Último pago", "Total_pagado": "Total pagado", "ID_Socio": "N°"})
+        st.markdown("#### Los 5 mayores deudores")
+        st.dataframe(vista(con_deuda.head(5)), hide_index=True)
+        st.markdown("#### Todos los socios")
+        filtro = st.selectbox("Mostrar", ["Todos", "Solo con deuda", "Solo morosos", "Solo activos"])
+        base = {"Todos": cuenta, "Solo con deuda": con_deuda, "Solo morosos": cuenta[cuenta["Estado"] == "Moroso"],
+                "Solo activos": cuenta[cuenta["Estado"] == "Activo"]}[filtro]
+        st.dataframe(vista(base), hide_index=True)
+        st.download_button("Descargar estado de cuenta (CSV)", data=vista(cuenta).to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"estado_cuenta_socios_{hasta_s:%Y-%m-%d}.csv", mime="text/csv")
+
+with tab_cons:
+    st.caption("Preguntale a los datos del club. Cada cifra la calcula el código sobre los datos cargados; "
+               "la IA solo elige qué consultar y redacta la respuesta.")
+    if datos is None:
+        st.info("Cargá los datos para poder hacer consultas.")
+    elif not hay_ia:
+        st.info("Las consultas necesitan una API key de Anthropic (`ANTHROPIC_API_KEY` en los secretos de la app).")
+    else:
+        st.session_state.setdefault("chat", [])
+        st.session_state.setdefault("consultas_usadas", 0)
+        with st.expander("Ejemplos de preguntas"):
+            st.markdown("- ¿Cuánto gastamos en seguridad en el tercer trimestre?\n"
+                        "- ¿Cuáles fueron los ingresos extraordinarios de este año y qué parte del resultado representan?\n"
+                        "- ¿Quiénes son los 10 mayores deudores y cuánto deben?\n"
+                        "- ¿Cómo viene la cuota promedio mes a mes? ¿Y la tasa de cobro?\n"
+                        "- Comparame septiembre contra agosto en ingresos y egresos.\n"
+                        "- ¿Cuánto pagó en cuotas Kevin Acosta y qué meses debe?")
+        for m in st.session_state["chat"]:
+            with st.chat_message(m["rol"]):
+                st.markdown(m["texto"])
+                if m.get("trazas"):
+                    with st.expander("Cómo se calculó"):
+                        for tz in m["trazas"]:
+                            st.code(f"{tz['herramienta']}({tz['argumentos']})" + (f"  ->  ERROR: {tz['error']}" if tz["error"] else ""))
+        pregunta = st.chat_input("Escribí tu consulta sobre los datos del club")
+        if pregunta:
+            if st.session_state["consultas_usadas"] >= max_consultas:
+                st.warning(f"Se alcanzó el máximo de {max_consultas} consultas por sesión.")
+            else:
+                previo = [{"rol": m["rol"], "texto": m["texto"]} for m in st.session_state["chat"]]
+                st.session_state["chat"].append({"rol": "user", "texto": pregunta})
+                with st.chat_message("user"):
+                    st.markdown(pregunta)
+                with st.chat_message("assistant"):
+                    with st.spinner("Consultando los datos..."):
+                        try:
+                            texto, trazas, uso = co.Consultor(datos).preguntar(pregunta, previo)
+                            co.registrar_consulta(RUTA_CONSULTAS, pregunta, texto, trazas, uso)
+                        except Exception as e:
+                            texto, trazas = f"No pude responder la consulta ({type(e).__name__}). Revisá la API key y el crédito de la cuenta.", []
+                    st.markdown(texto)
+                st.session_state["chat"].append({"rol": "assistant", "texto": texto, "trazas": trazas})
+                st.session_state["consultas_usadas"] += 1
 
 with tab_datos:
     if not inf:
@@ -275,3 +376,11 @@ with tab_reg:
         st.dataframe(reg.iloc[::-1], hide_index=True)
         st.download_button("Descargar registro (CSV)", data=reg.to_csv(index=False).encode("utf-8"),
                            file_name="registro_corridas.csv", mime="text/csv")
+    st.markdown("#### Consultas realizadas")
+    regc = co.leer_registro_consultas(RUTA_CONSULTAS)
+    if regc.empty:
+        st.info("Todavía no se hizo ninguna consulta.")
+    else:
+        st.dataframe(regc.iloc[::-1], hide_index=True)
+        st.download_button("Descargar consultas (CSV)", data=regc.to_csv(index=False).encode("utf-8"),
+                           file_name="registro_consultas.csv", mime="text/csv")

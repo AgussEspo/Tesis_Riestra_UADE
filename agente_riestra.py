@@ -31,6 +31,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
 from xml.sax.saxutils import escape
 
@@ -123,36 +124,195 @@ def _cap(txt):
 # ----------------------------------------------------------------------------
 # 1. FUENTE DE DATOS
 # ----------------------------------------------------------------------------
+def _norm(txt):
+    """Minúsculas, sin tildes y con guiones bajos: 'Categoría Gasto' -> 'categoria_gasto'."""
+    t = unicodedata.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "_", t.lower()).strip("_")
+
+
+ALIAS_COL = {
+    "id_socio": "ID_Socio", "idsocio": "ID_Socio", "id": "ID_Socio", "nombre": "Nombre", "apellido": "Apellido",
+    "fecha_alta": "Fecha_Alta", "alta": "Fecha_Alta", "estado": "Estado", "fecha": "Fecha", "socio": "Socio",
+    "monto": "Monto", "importe": "Monto", "categoria": "Categoria", "rubro": "Categoria",
+    "descripcion": "Descripcion", "detalle": "Descripcion", "concepto": "Descripcion", "tipo": "Tipo",
+}
+ALIAS_HOJA = {
+    "socios": "Socios", "pago_cuota_social": "Pago_Cuota_Social", "pagos_cuota_social": "Pago_Cuota_Social",
+    "pagos": "Pago_Cuota_Social", "pagos_de_cuota": "Pago_Cuota_Social", "cuota_social": "Pago_Cuota_Social",
+    "ingresos": "Ingresos", "egresos": "Egresos", "gastos": "Egresos",
+}
+# Palabras que marcan un movimiento como extraordinario (además de la regla de no recurrencia)
+PALABRAS_EXTRA = ("extraordinari", "streamer", "amistoso", "excepcional", "venta de jugador", "pase de jugador",
+                  "indemniz", "multa", "donacion", "subsidio", "premio")
+
+
+def _numero(valor):
+    """Convierte '1.234.567', '17,000', '$ 1.234,56' o 1234 en número."""
+    if isinstance(valor, (int, float)):
+        return valor
+    s = str(valor).strip().replace("$", "").replace(" ", "").replace("\u00a0", "")
+    if not s:
+        return float("nan")
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", "") if re.fullmatch(r"-?\d{1,3}(,\d{3})+", s) else s.replace(",", ".")
+    elif "." in s and re.fullmatch(r"-?\d{1,3}(\.\d{3})+", s):
+        s = s.replace(".", "")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
+def _serie_numerica(s):
+    return s if pd.api.types.is_numeric_dtype(s) else s.map(_numero)
+
+
+def _serie_fecha(s):
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    txt = s.astype(str).str.strip()
+    iso = txt.str.match(r"^\d{4}-\d{1,2}-\d{1,2}")
+    out = pd.to_datetime(txt.where(iso, None), errors="coerce")
+    if (~iso).any():
+        out = out.fillna(pd.to_datetime(txt.where(~iso, None), errors="coerce", dayfirst=True))
+    return out
+
+
+def marcar_extraordinarios(df):
+    """Agrega 'extraordinario' (bool) y 'motivo_extra' a Ingresos/Egresos.
+    Reglas (en este orden):
+      1. Si el archivo trae una columna 'Tipo', manda lo que diga (Extraordinario / Ordinario).
+      2. Palabras clave en la descripción o el rubro (streamer, amistoso, premio, multa...).
+      3. No recurrencia: la descripción aparece en menos de la mitad de los meses con datos
+         (solo si hay al menos 3 meses de historia)."""
+    df = df.copy()
+    desc = df["Descripcion"].fillna("").astype(str) if "Descripcion" in df.columns else pd.Series("", index=df.index)
+    texto = (df["Categoria"].astype(str) + " " + desc).map(_norm)
+    mes = df["Fecha"].dt.to_period("M")
+    n_hist = mes.nunique()
+    clave = df["Categoria"].astype(str) + "|" + desc.map(_norm)
+    meses_clave = pd.Series(mes.values, index=df.index).groupby(clave).nunique()
+    veces = clave.map(meses_clave)
+
+    extra = pd.Series(False, index=df.index)
+    motivo = pd.Series("", index=df.index)
+    for kw in PALABRAS_EXTRA:
+        hit = texto.str.contains(_norm(kw), regex=False)
+        motivo = motivo.where(~hit | (motivo != ""), f"Palabra clave: {kw.strip()}")
+        extra |= hit
+    if n_hist >= 3:
+        rare = (veces / n_hist) < 0.5
+        motivo = motivo.where(~rare | (motivo != ""), "No recurrente: " + veces.astype(str) + f" de {n_hist} meses")
+        extra |= rare
+    if "Tipo" in df.columns:
+        t = df["Tipo"].astype(str).map(_norm)
+        es_x, es_o = t.str.contains("extra"), t.str.contains("ordinari") & ~t.str.contains("extra")
+        extra = (extra & ~es_o) | es_x
+        motivo = motivo.where(~es_x, "Marcado como extraordinario en el archivo").where(~es_o, "")
+    df["extraordinario"] = extra
+    df["motivo_extra"] = motivo.where(extra, "")
+    return df
+
+
 def preparar_datos(hojas):
-    """Valida hojas/columnas y convierte fechas. `hojas` = dict nombre -> DataFrame."""
-    hojas = {str(k).strip(): v for k, v in hojas.items()}
+    """Valida hojas/columnas, normaliza formatos y marca movimientos extraordinarios.
+    `hojas` = dict nombre -> DataFrame."""
+    hojas = {ALIAS_HOJA.get(_norm(k), str(k).strip()): v for k, v in hojas.items()}
     faltan = [h for h in COLUMNAS if h not in hojas]
     if faltan:
-        raise ValueError(f"Faltan estas pestañas en el archivo: {', '.join(faltan)}. "
-                         f"Se esperan: {', '.join(COLUMNAS)}.")
+        raise ValueError(f"Faltan estas pestañas/archivos: {', '.join(faltan)}. Se esperan: {', '.join(COLUMNAS)}.")
     for hoja, cols in COLUMNAS.items():
         df = hojas[hoja]
-        df.columns = [str(c).strip() for c in df.columns]
+        df.columns = [ALIAS_COL.get(_norm(c), str(c).strip()) for c in df.columns]
         falt = [c for c in cols if c not in df.columns]
         if falt:
-            raise ValueError(f"En la pestaña '{hoja}' faltan las columnas: {', '.join(falt)}.")
+            raise ValueError(f"En '{hoja}' faltan las columnas: {', '.join(falt)}.")
     socios = hojas["Socios"].copy()
     pagos = hojas["Pago_Cuota_Social"].copy()
     ing = hojas["Ingresos"].copy()
     egr = hojas["Egresos"].copy()
-    socios["Fecha_Alta"] = pd.to_datetime(socios["Fecha_Alta"], errors="coerce")
+    socios["Fecha_Alta"] = _serie_fecha(socios["Fecha_Alta"])
+    for d in (socios, pagos):
+        try:
+            d["ID_Socio"] = pd.to_numeric(d["ID_Socio"])
+        except (ValueError, TypeError):
+            d["ID_Socio"] = d["ID_Socio"].astype(str).str.strip()
     for d in (pagos, ing, egr):
-        d["Fecha"] = pd.to_datetime(d["Fecha"], errors="coerce")
-        d["Monto"] = pd.to_numeric(d["Monto"], errors="coerce")
+        d["Fecha"] = _serie_fecha(d["Fecha"])
+        d["Monto"] = _serie_numerica(d["Monto"])
         d.dropna(subset=["Fecha", "Monto"], inplace=True)
     if min(len(pagos), len(ing), len(egr)) == 0:
-        raise ValueError("Alguna de las pestañas de movimientos no tiene datos válidos.")
-    return {"socios": socios, "pagos": pagos, "ing": ing, "egr": egr}
+        raise ValueError("Alguna de las tablas de movimientos no tiene datos válidos (revisá fechas y montos).")
+    return {"socios": socios, "pagos": pagos, "ing": marcar_extraordinarios(ing), "egr": marcar_extraordinarios(egr)}
 
 
 def cargar_excel(fuente):
     """`fuente`: ruta, archivo subido o BytesIO."""
     return preparar_datos(pd.read_excel(fuente, sheet_name=None))
+
+
+def _leer_csv(contenido):
+    texto = None
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            texto = contenido.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    muestra = texto[:4096]
+    try:
+        sep = csv.Sniffer().sniff(muestra, delimiters=",;\t|").delimiter
+    except csv.Error:
+        sep = ";" if muestra.count(";") > muestra.count(",") else ","
+    return pd.read_csv(io.StringIO(texto), sep=sep, dtype=str, keep_default_na=False)
+
+
+def _tabla_de_csv(nombre, df):
+    n = _norm(os.path.splitext(os.path.basename(nombre))[0])
+    for clave, tabla in (("ingreso", "Ingresos"), ("egreso", "Egresos"), ("gasto", "Egresos"),
+                         ("pago", "Pago_Cuota_Social"), ("cuota", "Pago_Cuota_Social"), ("socio", "Socios")):
+        if clave in n:
+            return tabla
+    cols = {ALIAS_COL.get(_norm(c), c) for c in df.columns}
+    if {"Estado", "Fecha_Alta"} <= cols:
+        return "Socios"
+    if {"ID_Socio", "Monto", "Fecha"} <= cols:
+        return "Pago_Cuota_Social"
+    raise ValueError(f"No pude identificar qué tabla es '{nombre}'. Nombrá el archivo con la palabra "
+                     f"'socios', 'pagos', 'ingresos' o 'egresos'.")
+
+
+def cargar_archivos(items):
+    """`items`: lista de (nombre_archivo, bytes). Acepta un .xlsx, o varios .csv (uno por tabla)."""
+    hojas = {}
+    for nombre, contenido in items:
+        ext = os.path.splitext(nombre)[1].lower()
+        if ext in (".xlsx", ".xlsm", ".xls"):
+            if len(items) > 1:
+                raise ValueError("Subí un solo Excel, o bien los archivos CSV (no ambos a la vez).")
+            return cargar_excel(io.BytesIO(contenido))
+        if ext != ".csv":
+            raise ValueError(f"Formato no soportado: '{nombre}'. Usá .xlsx o .csv.")
+        df = _leer_csv(contenido)
+        tabla = _tabla_de_csv(nombre, df)
+        if tabla in hojas:
+            raise ValueError(f"Hay dos archivos para la tabla '{tabla}'.")
+        hojas[tabla] = df
+    return preparar_datos(hojas)
+
+
+def cargar_rutas(rutas):
+    """Rutas a archivos o a una carpeta con los CSV."""
+    items = []
+    for r in rutas:
+        if os.path.isdir(r):
+            items += [(f, open(os.path.join(r, f), "rb").read()) for f in sorted(os.listdir(r))
+                      if f.lower().endswith((".csv", ".xlsx"))]
+        else:
+            items.append((r, open(r, "rb").read()))
+    return cargar_archivos(items)
 
 
 def _bytes_a_datos(contenido):
@@ -291,6 +451,89 @@ def _metricas_mes(datos, per):
     }
 
 
+def estado_cuenta_socios(datos, hasta=None):
+    """Estado de cuenta de TODOS los socios al cierre de `hasta` (por defecto, el último dato).
+
+    Criterio (estimado, porque no hay una cuota fija en los datos):
+      - Cada socio debe una cuota por mes, desde el mes de su alta (o desde el primer mes con datos).
+      - Mes impago = mes sin ningún pago registrado.
+      - Deuda estimada = suma, por cada mes impago, de la cuota promedio que pagó el club ese mes.
+    """
+    socios, pagos = datos["socios"], datos["pagos"]
+    fmin, fmax = rango_datos(datos)
+    hasta = min(pd.Timestamp(hasta), fmax) if hasta is not None else fmax
+    pagos = pagos[pagos["Fecha"] < hasta.normalize() + pd.Timedelta(days=1)].copy()
+    pagos["mes"] = pagos["Fecha"].dt.to_period("M")
+    meses = pd.period_range(fmin.to_period("M"), hasta.to_period("M"), freq="M")
+    cuota_mes = pagos.groupby("mes")["Monto"].mean()
+    cuota_def = float(pagos["Monto"].mean()) if len(pagos) else 0.0
+    meses_pagados = pagos.groupby("ID_Socio")["mes"].agg(lambda x: set(x))
+    ultimo = pagos.groupby("ID_Socio")["Fecha"].max()
+    total_pagado = pagos.groupby("ID_Socio")["Monto"].sum()
+
+    filas = []
+    for _, r in socios.iterrows():
+        sid = r["ID_Socio"]
+        alta = r["Fecha_Alta"]
+        inicio = max(meses[0], alta.to_period("M")) if pd.notna(alta) else meses[0]
+        esperados = [m for m in meses if m >= inicio]
+        pag = meses_pagados.get(sid, set())
+        impagos = [m for m in esperados if m not in pag]
+        deuda = sum(float(cuota_mes.get(m, cuota_def)) for m in impagos)
+        filas.append({
+            "ID_Socio": sid, "Socio": f"{r.get('Nombre', '')} {r.get('Apellido', '')}".strip(),
+            "Estado": r["Estado"], "Fecha_Alta": alta,
+            "Meses_esperados": len(esperados), "Meses_pagados": len(esperados) - len(impagos),
+            "Meses_impagos": len(impagos), "Deuda_estimada": int(round(deuda)),
+            "Detalle_impagos": ", ".join(f"{MESES_ABR[m.month - 1]}-{str(m.year)[2:]}" for m in impagos),
+            "Ultimo_pago": ultimo.get(sid, pd.NaT), "Total_pagado": int(total_pagado.get(sid, 0)),
+        })
+    df = pd.DataFrame(filas)
+    return df.sort_values(["Deuda_estimada", "Meses_impagos", "ID_Socio"], ascending=[False, False, True]).reset_index(drop=True)
+
+
+def _resumen_deudores(datos, hasta, top=5):
+    df = estado_cuenta_socios(datos, hasta)
+    fmin, _ = rango_datos(datos)
+    con = df[df["Deuda_estimada"] > 0]
+    total = int(df["Deuda_estimada"].sum())
+    primeros = con.head(top)
+    return {
+        "al_cierre_de": pd.Timestamp(hasta).strftime("%Y-%m-%d"),
+        "calculada_desde": f"{MESES[fmin.month - 1]} {fmin.year}",
+        "total_socios": int(len(df)), "socios_con_deuda": int(len(con)),
+        "deuda_total": total,
+        "deuda_morosos": int(df.loc[df["Estado"] == "Moroso", "Deuda_estimada"].sum()),
+        "deuda_activos": int(df.loc[df["Estado"] == "Activo", "Deuda_estimada"].sum()),
+        "participacion_top": float(primeros["Deuda_estimada"].sum() / total) if total else 0.0,
+        "top": [{
+            "puesto": i + 1, "id": int(r["ID_Socio"]) if str(r["ID_Socio"]).isdigit() else str(r["ID_Socio"]),
+            "socio": r["Socio"], "estado": r["Estado"], "meses_impagos": int(r["Meses_impagos"]),
+            "deuda": int(r["Deuda_estimada"]),
+            "ultimo_pago": r["Ultimo_pago"].strftime("%d/%m/%Y") if pd.notna(r["Ultimo_pago"]) else "sin pagos",
+        } for i, (_, r) in enumerate(primeros.iterrows())],
+    }
+
+
+def _lista_extra(df, tipo):
+    out = []
+    for _, r in df[df["extraordinario"]].sort_values("Fecha").iterrows():
+        out.append({"fecha": r["Fecha"].strftime("%d/%m/%Y"), "tipo": tipo, "rubro": str(r["Categoria"]),
+                    "descripcion": str(r["Descripcion"]) if "Descripcion" in df.columns else "",
+                    "monto": int(r["Monto"]), "motivo": r["motivo_extra"]})
+    return out
+
+
+def _resumen_extraordinarios(ing, egr, resultado):
+    li, le = _lista_extra(ing, "Ingreso"), _lista_extra(egr, "Egreso")
+    ti, te = sum(x["monto"] for x in li), sum(x["monto"] for x in le)
+    neto = ti - te
+    res_ord = resultado - neto
+    return {"ingresos": li, "egresos": le, "total_ingresos": ti, "total_egresos": te, "neto": neto,
+            "cantidad": len(li) + len(le), "resultado_ordinario": res_ord,
+            "peso_en_resultado": neto / resultado if resultado else 0.0}
+
+
 def calcular_kpis(datos, tipo, clave):
     socios = datos["socios"]
     fmin, fmax = rango_datos(datos)
@@ -366,6 +609,8 @@ def calcular_kpis(datos, tipo, clave):
             "cuotas_sobre_egresos": cuotas_total / egr_total if egr_total else 0,
             "tasa_cobro_promedio": float(sum(x["tasa_cobro"] for x in mensual) / len(mensual)),
         },
+        "extraordinarios": _resumen_extraordinarios(ing, egr, int(resultado)),
+        "deudores": _resumen_deudores(datos, hasta),
         "calidad_datos": {
             "pagos_previos_al_alta": int((chk["Fecha"] < chk["Fecha_Alta"]).sum()),
             "morosos_con_pagos": int(pagos[pagos["ID_Socio"].isin(ids_morosos)]["ID_Socio"].nunique()),
@@ -377,7 +622,8 @@ def calcular_kpis(datos, tipo, clave):
             cols = [c for c in ("Categoria", "Descripcion") if c in df.columns]
             return [{"fecha": r["Fecha"].strftime("%d/%m"), "rubro": str(r["Categoria"]),
                      "descripcion": str(r["Descripcion"]) if "Descripcion" in cols else "",
-                     "monto": int(r["Monto"])} for _, r in df.sort_values("Fecha").iterrows()]
+                     "monto": int(r["Monto"]), "extra": bool(r.get("extraordinario", False))}
+                    for _, r in df.sort_values("Fecha").iterrows()]
         mi = movs(ing)
         mi.append({"fecha": "mes", "rubro": "Cuota social", "descripcion": f"{len(pagos)} pagos de socios", "monto": cuotas_total})
         k["movimientos"] = {"ingresos": mi, "egresos": movs(egr)}
@@ -393,6 +639,8 @@ PROMPT_SISTEMA = (
     "no inventes datos ni hagas cálculos que no estén en el JSON. El campo periodo.tipo indica si "
     "el informe es mensual, trimestral o anual; si hay 'comparacion', contrastá con ese período anterior. "
     "Montos en pesos argentinos (por ejemplo $ 224,2 M). Tono ejecutivo, claro y sobrio, español neutro. "
+    "La deuda de los socios es una ESTIMACIÓN (meses sin pago por la cuota promedio del club), no una deuda contable: aclaralo. "
+    "Los movimientos 'extraordinarios' no son recurrentes: advertí que no deben usarse para proyectar. "
     "El informe tiene tres partes: INTRODUCCIÓN, DESARROLLO y CIERRE. Cada texto es prosa corrida: "
     "sin viñetas, sin markdown, sin asteriscos y sin títulos dentro del texto. "
     "Respondé SOLO con un JSON válido, sin texto extra ni bloques de código, con exactamente estas claves: "
@@ -401,12 +649,14 @@ PROMPT_SISTEMA = (
     '"egresos": "3 a 4 oraciones: total, rubros de mayor peso y variación vs período anterior", '
     '"resultado": "3 a 4 oraciones: resultado, margen, cobertura de egresos, evolución mensual y comparación", '
     '"socios": "3 a 4 oraciones: padrón, morosidad, cuota social, cuota promedio y tasa de cobro", '
+    '"deudores": "2 a 3 oraciones: cuántos socios tienen deuda estimada, monto total, los cinco mayores deudores por nombre con su deuda y si figuran como activos o morosos", '
+    '"extraordinarios": "2 a 4 oraciones: ingresos y egresos extraordinarios del período (descripción y monto), su peso en el resultado y el resultado sin ellos; si no hubo, decirlo", '
     '"alertas": ["2 a 4 puntos de atención, una oración cada uno"], '
     '"cierre": "2 a 3 oraciones: conclusión general, sin repetir la introducción", '
     '"recomendaciones": ["3 a 4 acciones concretas, una oración cada una"]}'
 )
 
-CLAVES_TEXTO = ("introduccion", "ingresos", "egresos", "resultado", "socios", "cierre")
+CLAVES_TEXTO = ("introduccion", "ingresos", "egresos", "resultado", "socios", "deudores", "extraordinarios", "cierre")
 CLAVES_LISTA = ("alertas", "recomendaciones")
 
 
@@ -495,7 +745,40 @@ def analisis_local(k):
     else:
         soc += f"La cuota promedio fue de {ars(s['cuota_promedio'])} y abonó el {pct(s['tasa_cobro_promedio'], 0)} de los socios."
 
+    d, x = k["deudores"], k["extraordinarios"]
+    if d["socios_con_deuda"] == 0:
+        deu = f"Al cierre del período ningún socio registra cuotas impagas."
+    else:
+        top = d["top"]
+        nombres = _lista_y([f"{r['socio']} ({ars(r['deuda'])})" for r in top])
+        deu = (f"Al cierre del período, {d['socios_con_deuda']} de {d['total_socios']} socios registran cuotas impagas, con una deuda "
+               f"estimada total de {ars(d['deuda_total'])}. Los {len(top)} mayores deudores son {nombres} y concentran el "
+               f"{pct(d['participacion_top'])} de esa deuda. ")
+        n_act = sum(1 for r in top if r["estado"] != "Moroso")
+        deu += (f"{n_act} de ellos figuran como activos en el padrón pese a tener cuotas impagas, por lo que conviene revisar su estado. "
+                if n_act else "Todos figuran como morosos en el padrón. ")
+        deu += f"La deuda es una estimación (meses sin pago por la cuota promedio del club, desde {d['calculada_desde']})."
+
+    if x["cantidad"] == 0:
+        extra = "En el período no se registraron ingresos ni egresos extraordinarios, por lo que el resultado refleja la operatoria habitual del club."
+    else:
+        partes = []
+        for lista, nombre, total in ((x["ingresos"], "ingreso", x["total_ingresos"]), (x["egresos"], "egreso", x["total_egresos"])):
+            if lista:
+                det = _lista_y([f"{r['descripcion']} ({r['fecha']}, {ars_m(r['monto'])})" for r in lista])
+                partes.append(f"{len(lista)} {nombre}{'s' if len(lista) > 1 else ''} extraordinario{'s' if len(lista) > 1 else ''} "
+                              f"por {ars_m(total)}: {det}")
+        extra = ("Se identificaron " + " y ".join(partes) + ". Sin considerarlos, el resultado del período habría sido de "
+                 f"{ars_m(x['resultado_ordinario'])} en lugar de {ars_m(t['resultado'])}"
+                 + (f" (el {pct(abs(x['peso_en_resultado']))} del resultado proviene de estos movimientos)" if t["resultado"] else "")
+                 + ". Al no ser recurrentes, no conviene usarlos como base para proyectar los próximos períodos.")
+
     alertas, temas = [], []
+    if x["cantidad"] and abs(x["peso_en_resultado"]) >= 0.10:
+        alertas.append(f"El {pct(abs(x['peso_en_resultado']))} del resultado proviene de movimientos extraordinarios no recurrentes.")
+        temas.append("la dependencia de ingresos extraordinarios")
+    if d["socios_con_deuda"] and any(r["estado"] != "Moroso" for r in d["top"]):
+        alertas.append("Hay socios entre los mayores deudores que figuran como activos: el estado del padrón no refleja la deuda real.")
     if ic[0][1] / t["ingresos"] >= 0.40:
         alertas.append(f"Alta concentración de ingresos: {ic[0][0]} explica el {pct(ic[0][1] / t['ingresos'])} del total y una baja "
                        f"o demora en ese rubro impactaría de forma directa en el resultado.")
@@ -531,11 +814,17 @@ def analisis_local(k):
         reco.append("Implementar un plan de regularización para socios morosos (recordatorios, planes de pago y débito automático).")
     if s["cuotas_sobre_ingresos"] < 0.05:
         reco.append("Revisar la política de cuota social y de captación de socios para que aporte una proporción mayor al financiamiento del club.")
+    if d["socios_con_deuda"]:
+        reco.append(f"Gestionar de forma directa el cobro de los {len(d['top'])} mayores deudores (contacto personal y plan de pagos), "
+                    f"que concentran el {pct(d['participacion_top'])} de la deuda estimada.")
+    if x["cantidad"] and abs(x["peso_en_resultado"]) >= 0.10:
+        reco.append("Presupuestar sin contar los ingresos extraordinarios y destinarlos a reservas o inversiones puntuales.")
     reco.append("Destinar parte del superávit a un fondo de reserva y a inversión en infraestructura e inferiores."
                 if sup else "Definir un plan de reducción de gastos y refuerzo de ingresos para revertir el déficit.")
     reco.append("Repetir este reporte periódicamente para monitorear la evolución de los indicadores.")
     return {"introduccion": intro, "ingresos": ing, "egresos": egr, "resultado": res, "socios": soc,
-            "alertas": alertas, "cierre": cierre, "recomendaciones": reco}
+            "deudores": deu, "extraordinarios": extra,
+            "alertas": alertas, "cierre": cierre, "recomendaciones": reco[:5]}
 
 
 def generar_analisis(k, usar_ia=True):
@@ -792,7 +1081,7 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
     def tabla_movimientos(titulo, lista, total):
         filas = [["Fecha", "Rubro", "Descripción", "Monto"]]
         for r in lista:
-            filas.append([r["fecha"], Paragraph(escape(r["rubro"]), celda), Paragraph(escape(r["descripcion"]), celda), ars(r["monto"])])
+            filas.append([r["fecha"], Paragraph(escape(r["rubro"]), celda), Paragraph(escape(r["descripcion"] + (" [extraordinario]" if r.get("extra") else "")), celda), ars(r["monto"])])
         filas.append(["", "", "Total", ars(total)])
         tb = Table(filas, colWidths=[ancho * 0.10, ancho * 0.24, ancho * 0.46, ancho * 0.20], repeatRows=1)
         tb.setStyle(TableStyle([
@@ -824,6 +1113,50 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
         ruta, ratio = graficos[nombre]
         return Image(ruta, width=ancho, height=ancho / ratio)
 
+    d, x = k["deudores"], k["extraordinarios"]
+
+    def tabla_extraordinarios():
+        filas = [["Fecha", "Tipo", "Rubro", "Descripción", "Monto"]]
+        for r in x["ingresos"] + x["egresos"]:
+            filas.append([r["fecha"], r["tipo"], Paragraph(escape(r["rubro"]), celda), Paragraph(escape(r["descripcion"]), celda), ars(r["monto"])])
+        tb = Table(filas, colWidths=[ancho * 0.13, ancho * 0.10, ancho * 0.17, ancho * 0.40, ancho * 0.20], repeatRows=1)
+        est = [("FONT", (0, 0), (-1, -1), "Helvetica", 8), ("BACKGROUND", (0, 0), (-1, 0), NEGRO),
+               ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8),
+               ("ALIGN", (4, 0), (4, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+               ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GRIS_CLARO])]
+        for i, r in enumerate(x["ingresos"] + x["egresos"], start=1):
+            est.append(("TEXTCOLOR", (1, i), (1, i), VERDE if r["tipo"] == "Ingreso" else ROJO))
+        tb.setStyle(TableStyle(est))
+        tira = Table([[
+            mini("Resultado del período", ars_m(t["resultado"])),
+            mini("Efecto de extraordinarios", ars_m(x["neto"]), "ingresos menos egresos extraordinarios"),
+            mini("Resultado sin extraordinarios", ars_m(x["resultado_ordinario"]), "operatoria habitual"),
+        ]], colWidths=[ancho / 3] * 3)
+        tira.setStyle(TableStyle([
+            ("LINEABOVE", (0, 0), (-1, 0), 2.5, NEGRO), ("BACKGROUND", (0, 0), (-1, -1), GRIS_CLARO),
+            ("LINEAFTER", (0, 0), (-2, -1), 3, colors.white), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+        return [tb, Spacer(1, 6), tira]
+
+    def tabla_deudores():
+        filas = [["#", "Socio", "Estado", "Meses impagos", "Deuda estimada", "Último pago"]]
+        for r in d["top"]:
+            filas.append([str(r["puesto"]), Paragraph(escape(f"{r['socio']} (N° {r['id']})"), celda), r["estado"],
+                          str(r["meses_impagos"]), ars(r["deuda"]), r["ultimo_pago"]])
+        tb = Table(filas, colWidths=[ancho * 0.06, ancho * 0.31, ancho * 0.13, ancho * 0.16, ancho * 0.18, ancho * 0.16], repeatRows=1)
+        est = [("FONT", (0, 0), (-1, -1), "Helvetica", 8.5), ("BACKGROUND", (0, 0), (-1, 0), NEGRO),
+               ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 8.5),
+               ("ALIGN", (3, 0), (4, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+               ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GRIS_CLARO])]
+        for i, r in enumerate(d["top"], start=1):
+            est.append(("TEXTCOLOR", (2, i), (2, i), ROJO if r["estado"] == "Moroso" else GRIS))
+        tb.setStyle(TableStyle(est))
+        pie = Paragraph(f"Deuda estimada total del club: <b>{ars(d['deuda_total'])}</b> en {d['socios_con_deuda']} de {d['total_socios']} socios "
+                        f"(morosos: {ars(d['deuda_morosos'])}; activos: {ars(d['deuda_activos'])}). Calculada desde {d['calculada_desde']}.", peq)
+        return [tb, Spacer(1, 3), pie]
+
     q = k["calidad_datos"]
     notas = []
     if k["periodo"]["parcial"]:
@@ -834,6 +1167,10 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
         notas.append(f"{q['morosos_con_pagos']} socios con estado Moroso registran pagos de cuota en el período; conviene actualizar el estado en el padrón.")
     if q["pagos_previos_al_alta"]:
         notas.append(f"{q['pagos_previos_al_alta']} pagos tienen fecha anterior al alta del socio; se excluyen del cálculo de tasa de cobro.")
+    notas.append("Deuda estimada = meses sin ningún pago registrado (desde el alta del socio) por la cuota promedio del club en cada mes. "
+                 "No es una deuda contable: no hay una cuota fija en los datos.")
+    notas.append("Se consideran extraordinarios los movimientos marcados como tales en el archivo (columna Tipo), los que contienen "
+                 "palabras clave (streamer, amistoso, premio, multa...) o los que no se repiten en la mayoría de los meses.")
     notas.append("La cantidad de socios, activos y morosos corresponde al padrón actual. La tasa de cobro mensual es la cantidad "
                  "de socios que pagaron sobre los socios dados de alta hasta ese mes.")
     if k["periodo"]["tipo"] == "mensual":
@@ -853,8 +1190,11 @@ def construir_pdf(k, a, salida, logo=None, origen_analisis="local", graficos=Non
                   tabla_movimientos("Egresos del mes", k["movimientos"]["egresos"], t["egresos"])]
     else:
         story += [tabla_mensual()]
-    story += [bloque("2.4 Socios y cuota social", a["socios"]), Spacer(1, 4), socios_t, Spacer(1, 6), img("socios")]
-    story.append(KeepTogether([subtitulo("2.5 Puntos de atención")] + bullets(a["alertas"])))
+    story += [KeepTogether([subtitulo("2.4 Movimientos extraordinarios"), Paragraph(escape(a["extraordinarios"]), cuerpo)]
+                           + ([Spacer(1, 4)] + tabla_extraordinarios() if x["cantidad"] else [])), Spacer(1, 4)]
+    story += [bloque("2.5 Socios y cuota social", a["socios"]), Spacer(1, 4), socios_t, Spacer(1, 6), img("socios")]
+    story += [KeepTogether([subtitulo(f"2.6 Los {len(d['top'])} mayores deudores"), Paragraph(escape(a["deudores"]), cuerpo), Spacer(1, 4)] + tabla_deudores())]
+    story.append(KeepTogether([subtitulo("2.7 Puntos de atención")] + bullets(a["alertas"])))
 
     story += seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
     story.append(KeepTogether([subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])))
@@ -903,7 +1243,7 @@ def leer_registro(ruta):
 # ----------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Agente de reporte financiero ejecutivo - Riestra")
-    ap.add_argument("fuente", help="ruta al .xlsx o URL (Google Sheets / OneDrive)")
+    ap.add_argument("fuente", nargs="+", help="ruta al .xlsx, carpeta o archivos .csv, o URL (Google Sheets / OneDrive)")
     ap.add_argument("--tipo", choices=list(TIPOS), default="mensual")
     ap.add_argument("--periodo", help="mensual: 2026-10 | trimestral: 2026-T3 | anual: 2026 (por defecto: el último disponible)")
     ap.add_argument("--salida", default="Reporte_Ejecutivo_Riestra.pdf")
@@ -912,14 +1252,14 @@ def main():
     ap.add_argument("--registro", default="registro_corridas.csv")
     args = ap.parse_args()
 
-    datos = cargar_desde_url(args.fuente) if args.fuente.startswith("http") else cargar_excel(args.fuente)
+    datos = cargar_desde_url(args.fuente[0]) if args.fuente[0].startswith("http") else cargar_rutas(args.fuente)
     clave = args.periodo or periodos_disponibles(datos)[args.tipo][0][1]
     k = calcular_kpis(datos, args.tipo, clave)
     a, origen, info = generar_analisis(k, usar_ia=not args.sin_ia)
     if info.get("aviso"):
         print("[aviso]", info["aviso"])
     construir_pdf(k, a, args.salida, args.logo or buscar_logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")), origen)
-    registrar_corrida(args.registro, args.fuente, k, a, origen, info)
+    registrar_corrida(args.registro, " + ".join(args.fuente), k, a, origen, info)
     print(f"Reporte generado: {args.salida}  ({k['periodo']['etiqueta']}, análisis: {origen})")
 
 
