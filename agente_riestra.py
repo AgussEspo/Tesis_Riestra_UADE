@@ -1513,10 +1513,11 @@ def construir_pdf(k, a, salida, logo=None, graficos=None):
     else:
         story += [bloque("2.10 Proyección", a["proyeccion"])]
 
-    story += seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
-    story.append(KeepTogether([subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])))
-    story.append(Spacer(1, 8))
-    story += [Paragraph("<b>Notas metodológicas</b>", peq)] + bullets(notas, nota)
+    # El cierre completo (cierre + recomendaciones + notas) va en un solo bloque: si no entra en lo que queda de la página,
+    # pasa entero a la siguiente, así nunca queda cortado.
+    story.append(KeepTogether(seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
+                              + [subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])
+                              + [Spacer(1, 8), Paragraph("<b>Notas metodológicas</b>", peq)] + bullets(notas, nota)))
     doc.build(story)
     return salida
 
