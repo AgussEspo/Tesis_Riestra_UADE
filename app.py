@@ -188,12 +188,8 @@ with st.sidebar:
                                      help="Se suma a las proyecciones fijas de 3, 6 y 12 meses.")
         metodo = st.selectbox("Método de proyección", list(ag.METODOS), format_func=lambda m: ag.METODOS[m].capitalize())
         meses_ppto = st.selectbox("Meses del presupuesto", [12, 6, 3])
-        st.subheader("4. Escudo (opcional)")
-        escudo = st.file_uploader("Escudo del club (PNG o JPG)", type=["png", "jpg", "jpeg"],
-                                  help="Si no lo subís, se usa assets/escudo.png cuando existe.")
         generar = st.button("Generar informe", type="primary")
     else:
-        escudo = None
         proy_extra, metodo, meses_ppto = 0, "tendencia", 12
         generar = False
 
@@ -210,10 +206,6 @@ if generar and datos is not None:
             graficos = ag.generar_graficos(k, carpeta)
             ruta_pdf = os.path.join(carpeta, "informe.pdf")
             logo = ag.buscar_logo(CARPETA_ASSETS)
-            if escudo is not None:  # el escudo subido en la sesión tiene prioridad
-                logo = os.path.join(carpeta, "escudo_subido" + os.path.splitext(escudo.name)[1].lower())
-                with open(logo, "wb") as f:
-                    f.write(escudo.getvalue())
             ag.construir_pdf(k, a, ruta_pdf, logo, graficos)
             with open(ruta_pdf, "rb") as f:
                 contenido_pdf = f.read()
