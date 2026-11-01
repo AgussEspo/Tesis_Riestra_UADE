@@ -1,0 +1,6 @@
+.streamlit/secrets.toml
+registro_corridas.csv
+registro_corridas.csv.anterior
+registro_envios.csv
+__pycache__/
+*.pyc
