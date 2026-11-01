@@ -13,12 +13,12 @@ import pandas as pd
 import streamlit as st
 
 import agente_riestra as ag
-import consultas as co
+import correo
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 RUTA_EJEMPLO = os.path.join(AQUI, "datos_ejemplo", "Riestra_Tesis_Finanzas_V2.xlsx")
 RUTA_REGISTRO = os.path.join(AQUI, "registro_corridas.csv")
-RUTA_CONSULTAS = os.path.join(AQUI, "registro_consultas.csv")
+RUTA_ENVIOS = os.path.join(AQUI, "registro_envios.csv")
 CARPETA_ASSETS = os.path.join(AQUI, "assets")
 
 st.set_page_config(page_title="Agente Financiero | Riestra", page_icon="📊", layout="wide")
@@ -59,6 +59,44 @@ def leer_ejemplo():
     return ag.cargar_excel(RUTA_EJEMPLO)
 
 
+
+
+def mostrar_proyeccion_tabla(pr):
+    st.dataframe(pd.DataFrame([{"Horizonte": f"{h['meses']} meses", "Hasta": h["hasta"].capitalize(), "Ingresos": ag.ars_m(h["ingresos"]),
+                                "Egresos": ag.ars_m(h["egresos"]), "Resultado": ag.ars_m(h["resultado"]),
+                                "Pesimista": ag.ars_m(h["res_pesimista"]), "Optimista": ag.ars_m(h["res_optimista"]),
+                                "Confiabilidad": h["confiabilidad"]} for h in pr["horizontes"]]), hide_index=True)
+
+
+def mostrar_presupuesto(pp, ej):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Ingresos ({pp['meses']} meses)", ag.ars_m(pp["total_ingresos"]))
+    c2.metric("Egresos", ag.ars_m(pp["total_egresos"]))
+    c3.metric("Reserva de contingencia", ag.ars_m(pp["reserva"]))
+    c4.metric("Resultado presupuestado", ag.ars_m(pp["resultado_final"]))
+    tabla = lambda filas: pd.DataFrame([{"Rubro": f["rubro"], "Actual (prom. mensual)": ag.ars_m(f["actual_mensual"]),
+                                         "Presupuesto mensual": ag.ars_m(f["mensual"]), f"Total {pp['meses']} meses": ag.ars_m(f["total"]),
+                                         "Variación": ag.signo_pct(f["variacion"], 0)} for f in filas])
+    t1, t2 = st.columns(2)
+    t1.markdown("**Ingresos por rubro**")
+    t1.dataframe(tabla(pp["filas_ingresos"]), hide_index=True)
+    t2.markdown("**Egresos por rubro**")
+    t2.dataframe(tabla(pp["filas_egresos"]), hide_index=True)
+    if pp.get("trimestres"):
+        st.markdown("**Presupuesto por trimestre**")
+        st.dataframe(pd.DataFrame([{"Trimestre": t["nombre"], "Ingresos": ag.ars_m(t["ingresos"]), "Egresos": ag.ars_m(t["egresos"]),
+                                    "Reserva": ag.ars_m(t["reserva"]), "Resultado": ag.ars_m(t["resultado"])} for t in pp["trimestres"]]), hide_index=True)
+    if ej:
+        st.markdown("**Ejecución: presupuesto armado con datos previos vs. real del período**")
+        filas = [{"Bloque": b, "Rubro": f["rubro"], "Presupuesto": ag.ars_m(f["presupuesto"]), "Real": ag.ars_m(f["real"]),
+                  "Desvío": ag.ars_m(f["desvio"]), "Desvío %": ag.signo_pct(f["desvio_pct"], 0) if f["presupuesto"] else "n/c"}
+                 for b, lista in (("Ingresos", ej["ingresos"]), ("Egresos", ej["egresos"])) for f in lista if max(f["presupuesto"], f["real"]) > 0]
+        filas.append({"Bloque": "Resultado", "Rubro": "Total", "Presupuesto": ag.ars_m(ej["presupuesto_resultado"]), "Real": ag.ars_m(ej["real_resultado"]),
+                      "Desvío": ag.ars_m(ej["desvio_resultado"]), "Desvío %": ag.signo_pct(ej["desvio_resultado_pct"], 0)})
+        st.dataframe(pd.DataFrame(filas), hide_index=True)
+    st.caption("Presupuesto prudente: ingresos -5%, egresos +5% y reserva del 5% sobre la tendencia de cada rubro. "
+               "Es una propuesta elaborada a partir de los datos, no un presupuesto aprobado.")
+
 # ----------------------------------------------------------------------------
 # Estilo y acceso
 # ----------------------------------------------------------------------------
@@ -86,13 +124,8 @@ if clave_app and not st.session_state.get("autenticado"):
         st.error("Contraseña incorrecta.")
     st.stop()
 
-api_key = secreto("ANTHROPIC_API_KEY")
-if api_key:
-    os.environ["ANTHROPIC_API_KEY"] = str(api_key)
-hay_ia = bool(os.environ.get("ANTHROPIC_API_KEY"))
-max_ia = int(secreto("MAX_IA_POR_SESION", 10))
-max_consultas = int(secreto("MAX_CONSULTAS_POR_SESION", 15))
-st.session_state.setdefault("ia_usos", 0)
+cfg_correo = correo.leer_configuracion(secreto)
+st.session_state.setdefault("envios", 0)
 
 # ----------------------------------------------------------------------------
 # Barra lateral: fuente de datos y período
@@ -150,15 +183,18 @@ with st.sidebar:
         tipo = st.radio("Tipo", list(ag.TIPOS), horizontal=True, format_func=str.capitalize)
         opciones = ag.periodos_disponibles(datos)[tipo]
         elegido = st.selectbox("Período", opciones, format_func=lambda o: o[0])
-        usar_ia = st.checkbox("Redactar análisis con IA (Claude)", value=hay_ia, disabled=not hay_ia)
-        if not hay_ia:
-            st.caption("Sin API key configurada: se usa el redactor automático.")
-        st.subheader("3. Escudo (opcional)")
+        st.subheader("3. Proyección y presupuesto")
+        proy_extra = st.number_input("Proyección a mi gusto (meses, 0 = ninguna)", min_value=0, max_value=36, value=0, step=1,
+                                     help="Se suma a las proyecciones fijas de 3, 6 y 12 meses.")
+        metodo = st.selectbox("Método de proyección", list(ag.METODOS), format_func=lambda m: ag.METODOS[m].capitalize())
+        meses_ppto = st.selectbox("Meses del presupuesto", [12, 6, 3])
+        st.subheader("4. Escudo (opcional)")
         escudo = st.file_uploader("Escudo del club (PNG o JPG)", type=["png", "jpg", "jpeg"],
                                   help="Si no lo subís, se usa assets/escudo.png cuando existe.")
         generar = st.button("Generar informe", type="primary")
     else:
         escudo = None
+        proy_extra, metodo, meses_ppto = 0, "tendencia", 12
         generar = False
 
 # ----------------------------------------------------------------------------
@@ -168,16 +204,8 @@ if generar and datos is not None:
     try:
         with st.spinner("Calculando indicadores y redactando el informe..."):
             clave = elegido[1]
-            k = ag.calcular_kpis(datos, tipo, clave)
-            quiere_ia = usar_ia and hay_ia
-            if quiere_ia and st.session_state["ia_usos"] >= max_ia:
-                st.warning(f"Se alcanzó el máximo de {max_ia} informes con IA por sesión. Se usa el redactor automático.")
-                quiere_ia = False
-            a, origen, info = ag.generar_analisis(k, usar_ia=quiere_ia)
-            if origen == "ia":
-                st.session_state["ia_usos"] += 1
-            if info.get("aviso"):
-                st.warning(info["aviso"])
+            k = ag.calcular_kpis(datos, tipo, clave, int(proy_extra) or None, metodo, int(meses_ppto))
+            a = ag.generar_analisis(k)
             carpeta = tempfile.mkdtemp()
             graficos = ag.generar_graficos(k, carpeta)
             ruta_pdf = os.path.join(carpeta, "informe.pdf")
@@ -186,11 +214,11 @@ if generar and datos is not None:
                 logo = os.path.join(carpeta, "escudo_subido" + os.path.splitext(escudo.name)[1].lower())
                 with open(logo, "wb") as f:
                     f.write(escudo.getvalue())
-            ag.construir_pdf(k, a, ruta_pdf, logo, origen, graficos)
+            ag.construir_pdf(k, a, ruta_pdf, logo, graficos)
             with open(ruta_pdf, "rb") as f:
                 contenido_pdf = f.read()
-            ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a, origen, info)
-        st.session_state["informe"] = {"k": k, "a": a, "origen": origen, "info": info, "graficos": graficos,
+            ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a)
+        st.session_state["informe"] = {"k": k, "a": a, "graficos": graficos,
                                        "pdf": contenido_pdf, "nombre": f"Reporte_{tipo}_{clave}.pdf"}
     except Exception as e:
         st.error(f"No se pudo generar el informe: {e}")
@@ -199,7 +227,7 @@ if generar and datos is not None:
 # Resultado
 # ----------------------------------------------------------------------------
 inf = st.session_state.get("informe")
-tab_inf, tab_socios, tab_cons, tab_datos, tab_reg = st.tabs(["Informe", "Socios", "Consultas", "Datos y calidad", "Registro"])
+tab_inf, tab_plan, tab_socios, tab_datos, tab_reg = st.tabs(["Informe", "Planificación", "Socios", "Datos y calidad", "Registro"])
 
 with tab_inf:
     if not inf:
@@ -209,8 +237,35 @@ with tab_inf:
         t, comp = k["totales"], k["comparacion"]
         c1, c2 = st.columns([3, 1])
         c1.subheader(f"{k['periodo']['tipo'].capitalize()}: {k['periodo']['etiqueta']}")
-        c1.caption("Análisis redactado por IA (Claude)." if inf["origen"] == "ia" else "Análisis redactado con reglas automáticas.")
         c2.download_button("Descargar PDF", data=inf["pdf"], file_name=inf["nombre"], mime="application/pdf")
+        with st.expander("Enviar el PDF por correo electrónico"):
+            if cfg_correo is None:
+                st.info("El envío por correo no está configurado. Hay que cargar `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` y `SMTP_PASSWORD` "
+                        "en los secretos de la app (ver `.streamlit/secrets.toml.example`).")
+            else:
+                destino = st.text_input("Destinatario(s)", placeholder="nombre@dominio.com, otra@dominio.com",
+                                        help=f"Hasta {correo.MAX_DESTINATARIOS} direcciones separadas por coma.", key="mail_dest")
+                asunto = st.text_input("Asunto", value=f"Reporte financiero Riestra - {k['periodo']['etiqueta']}", key="mail_asunto")
+                if st.button("Enviar PDF", key="mail_enviar"):
+                    validos, invalidos = correo.separar_destinatarios(destino)
+                    if invalidos:
+                        st.error("Direcciones no válidas: " + ", ".join(invalidos))
+                    elif st.session_state["envios"] >= cfg_correo["max_sesion"]:
+                        st.warning(f"Se alcanzó el máximo de {cfg_correo['max_sesion']} envíos por sesión.")
+                    else:
+                        try:
+                            with st.spinner("Enviando..."):
+                                correo.enviar_pdf(cfg_correo, validos, asunto.strip() or "Reporte financiero", correo.cuerpo_por_defecto(k, a["introduccion"]),
+                                                  inf["pdf"], inf["nombre"])
+                            st.session_state["envios"] += 1
+                            correo.registrar_envio(RUTA_ENVIOS, validos, inf["nombre"], "enviado")
+                            st.success("Informe enviado a: " + ", ".join(validos))
+                        except correo.ErrorCorreo as e:
+                            correo.registrar_envio(RUTA_ENVIOS, validos, inf["nombre"], "error", str(e))
+                            st.error(str(e))
+                        except Exception as e:
+                            correo.registrar_envio(RUTA_ENVIOS, validos, inf["nombre"], "error", type(e).__name__)
+                            st.error(f"No se pudo enviar el correo ({type(e).__name__}).")
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Ingresos", ag.ars_m(t["ingresos"]),
@@ -251,14 +306,63 @@ with tab_inf:
             st.dataframe(pd.DataFrame([{"#": r["puesto"], "Socio": f"{r['socio']} (N° {r['id']})", "Estado": r["estado"],
                                         "Meses impagos": r["meses_impagos"], "Deuda estimada": r["deuda"],
                                         "Último pago": r["ultimo_pago"]} for r in dd["top"]]), hide_index=True)
-        st.markdown("**2.7 Puntos de atención**")
+        st.markdown("**2.7 Presupuesto**")
+        st.write(a["presupuesto"])
+        if k.get("presupuesto"):
+            mostrar_presupuesto(k["presupuesto"], k.get("ejecucion"))
+        st.markdown("**2.8 Puntos de atención**")
         for x in a["alertas"]:
             st.markdown(f"- {x}")
+        sm = k["semaforo"]
+        circ = {"verde": "🟢", "amarillo": "🟡", "rojo": "🔴"}
+        st.markdown("**2.9 Semáforo de indicadores**")
+        st.write(a["semaforo"])
+        st.markdown(f"**Situación general:** {circ[sm['general']]} &nbsp;&nbsp;&nbsp; **Indicadores:** "
+                    f"🟢 {sm['conteo']['verde']} &nbsp;&nbsp; 🟡 {sm['conteo']['amarillo']} &nbsp;&nbsp; 🔴 {sm['conteo']['rojo']}")
+        st.dataframe(pd.DataFrame([{"Estado": circ[i["estado"]], "Indicador": i["indicador"], "Valor": i["valor"], "Criterio": i["criterio"]}
+                                   for i in sm["items"]]), hide_index=True)
+        st.markdown("**2.10 Proyección**")
+        st.write(a["proyeccion"])
+        if k.get("proyeccion"):
+            mostrar_imagen(inf["graficos"]["proyeccion"][0])
+            mostrar_proyeccion_tabla(k["proyeccion"])
         st.markdown("### 3. Cierre")
         st.write(a["cierre"])
         st.markdown("**Recomendaciones**")
         for x in a["recomendaciones"]:
             st.markdown(f"- {x}")
+
+with tab_plan:
+    if datos is None:
+        st.info("Cargá los datos para proyectar y presupuestar.")
+    else:
+        st.caption("Explorá proyecciones y presupuestos al instante, sin generar el PDF. Se calculan solo con movimientos "
+                   "ordinarios (sin extraordinarios), en pesos nominales y sin estacionalidad.")
+        fmin_, fmax_ = ag.rango_datos(datos)
+        p1, p2, p3 = st.columns(3)
+        h_user = p1.number_input("Meses a proyectar", min_value=1, max_value=36, value=6, step=1, key="plan_h")
+        m_user = p2.selectbox("Método", list(ag.METODOS), format_func=lambda m: ag.METODOS[m].capitalize(), key="plan_m")
+        b_user = p3.selectbox("Meses del presupuesto", [12, 6, 3], key="plan_b")
+        res_plan = ag.calcular_planificacion(datos, fmax_, None, int(h_user), m_user, int(b_user))
+        if not res_plan["proyeccion"]:
+            st.warning("No hay historial suficiente: se necesitan al menos 3 meses con datos.")
+        else:
+            pr_ = res_plan["proyeccion"]
+            if res_plan["nota_mes_incompleto"]:
+                st.caption(res_plan["nota_mes_incompleto"])
+            hx = next(h for h in pr_["horizontes"] if h["meses"] == int(h_user))
+            q1, q2, q3, q4 = st.columns(4)
+            q1.metric(f"Ingresos a {hx['meses']} meses", ag.ars_m(hx["ingresos"]))
+            q2.metric("Egresos", ag.ars_m(hx["egresos"]))
+            q3.metric("Resultado", ag.ars_m(hx["resultado"]), f"Pesimista {ag.ars_m(hx['res_pesimista'])}", delta_color="off")
+            q4.metric("Confiabilidad", hx["confiabilidad"], f"{pr_['meses_historial']} meses de historial", delta_color="off")
+            ruta_g = os.path.join(tempfile.mkdtemp(), "proy_live.png")
+            ag.grafico_proyeccion(pr_, ruta_g, max_meses=max(int(h_user), 6))
+            mostrar_imagen(ruta_g)
+            mostrar_proyeccion_tabla(pr_)
+            st.markdown(f"#### Presupuesto propuesto a {int(b_user)} meses")
+            if res_plan["presupuesto"]:
+                mostrar_presupuesto(res_plan["presupuesto"], None)
 
 with tab_socios:
     if datos is None:
@@ -293,50 +397,6 @@ with tab_socios:
         st.download_button("Descargar estado de cuenta (CSV)", data=vista(cuenta).to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"estado_cuenta_socios_{hasta_s:%Y-%m-%d}.csv", mime="text/csv")
 
-with tab_cons:
-    st.caption("Preguntale a los datos del club. Cada cifra la calcula el código sobre los datos cargados; "
-               "la IA solo elige qué consultar y redacta la respuesta.")
-    if datos is None:
-        st.info("Cargá los datos para poder hacer consultas.")
-    elif not hay_ia:
-        st.info("Las consultas necesitan una API key de Anthropic (`ANTHROPIC_API_KEY` en los secretos de la app).")
-    else:
-        st.session_state.setdefault("chat", [])
-        st.session_state.setdefault("consultas_usadas", 0)
-        with st.expander("Ejemplos de preguntas"):
-            st.markdown("- ¿Cuánto gastamos en seguridad en el tercer trimestre?\n"
-                        "- ¿Cuáles fueron los ingresos extraordinarios de este año y qué parte del resultado representan?\n"
-                        "- ¿Quiénes son los 10 mayores deudores y cuánto deben?\n"
-                        "- ¿Cómo viene la cuota promedio mes a mes? ¿Y la tasa de cobro?\n"
-                        "- Comparame septiembre contra agosto en ingresos y egresos.\n"
-                        "- ¿Cuánto pagó en cuotas Kevin Acosta y qué meses debe?")
-        for m in st.session_state["chat"]:
-            with st.chat_message(m["rol"]):
-                st.markdown(m["texto"])
-                if m.get("trazas"):
-                    with st.expander("Cómo se calculó"):
-                        for tz in m["trazas"]:
-                            st.code(f"{tz['herramienta']}({tz['argumentos']})" + (f"  ->  ERROR: {tz['error']}" if tz["error"] else ""))
-        pregunta = st.chat_input("Escribí tu consulta sobre los datos del club")
-        if pregunta:
-            if st.session_state["consultas_usadas"] >= max_consultas:
-                st.warning(f"Se alcanzó el máximo de {max_consultas} consultas por sesión.")
-            else:
-                previo = [{"rol": m["rol"], "texto": m["texto"]} for m in st.session_state["chat"]]
-                st.session_state["chat"].append({"rol": "user", "texto": pregunta})
-                with st.chat_message("user"):
-                    st.markdown(pregunta)
-                with st.chat_message("assistant"):
-                    with st.spinner("Consultando los datos..."):
-                        try:
-                            texto, trazas, uso = co.Consultor(datos).preguntar(pregunta, previo)
-                            co.registrar_consulta(RUTA_CONSULTAS, pregunta, texto, trazas, uso)
-                        except Exception as e:
-                            texto, trazas = f"No pude responder la consulta ({type(e).__name__}). Revisá la API key y el crédito de la cuenta.", []
-                    st.markdown(texto)
-                st.session_state["chat"].append({"rol": "assistant", "texto": texto, "trazas": trazas})
-                st.session_state["consultas_usadas"] += 1
-
 with tab_datos:
     if not inf:
         st.info("Generá un informe para ver el detalle.")
@@ -363,7 +423,7 @@ with tab_datos:
             st.write(f"- {q['pagos_previos_al_alta']} pagos tienen fecha anterior al alta del socio.")
         if k["periodo"]["parcial"]:
             st.write("- El período es parcial: solo hay datos de una parte de los meses.")
-        with st.expander("Indicadores calculados (JSON que recibe la IA)"):
+        with st.expander("Indicadores calculados"):
             st.json({c: v for c, v in k.items() if c != "movimientos"})
 
 with tab_reg:
@@ -376,11 +436,11 @@ with tab_reg:
         st.dataframe(reg.iloc[::-1], hide_index=True)
         st.download_button("Descargar registro (CSV)", data=reg.to_csv(index=False).encode("utf-8"),
                            file_name="registro_corridas.csv", mime="text/csv")
-    st.markdown("#### Consultas realizadas")
-    regc = co.leer_registro_consultas(RUTA_CONSULTAS)
-    if regc.empty:
-        st.info("Todavía no se hizo ninguna consulta.")
+    st.markdown("#### Envíos por correo")
+    regm = correo.leer_envios(RUTA_ENVIOS)
+    if regm.empty:
+        st.info("Todavía no se envió ningún informe por correo.")
     else:
-        st.dataframe(regc.iloc[::-1], hide_index=True)
-        st.download_button("Descargar consultas (CSV)", data=regc.to_csv(index=False).encode("utf-8"),
-                           file_name="registro_consultas.csv", mime="text/csv")
+        st.dataframe(regm.iloc[::-1], hide_index=True)
+        st.download_button("Descargar envíos (CSV)", data=regm.to_csv(index=False).encode("utf-8"),
+                           file_name="registro_envios.csv", mime="text/csv")
