@@ -1,0 +1,13 @@
+Fecha_Vencimiento,Tipo,Monto,Categoria,Concepto,Contraparte,Actividad,Estado,Cuenta
+2026-11-15,Pago,26000000,Préstamos,Cuota 8/12 préstamo Banco Provincia,Banco Provincia,Financiación,Confirmado,Banco
+2026-11-20,Cobro,70000000,Venta de jugadores,Saldo pendiente de la venta del jugador al exterior,Club del exterior,Operativa,Confirmado,Banco
+2026-12-10,Cobro,30000000,Sponsor,Bonus por objetivos deportivos,Speed,Operativa,Probable,Banco
+2026-12-15,Pago,26000000,Préstamos,Cuota 9/12 préstamo Banco Provincia,Banco Provincia,Financiación,Confirmado,Banco
+2026-12-18,Pago,21800000,Sueldos Jugadores,Aguinaldo 2.º semestre plantel y cuerpo técnico,Personal,Operativa,Confirmado,Banco
+2027-01-08,Pago,40000000,Compra de pases,Saldo por la compra del pase del delantero,Club vendedor,Inversión,Confirmado,Banco
+2027-01-15,Pago,26000000,Préstamos,Cuota 10/12 préstamo Banco Provincia,Banco Provincia,Financiación,Confirmado,Banco
+2027-01-20,Pago,60000000,Obras e infraestructura,Certificado final y devolución del fondo de reparo de la obra,Constructora,Inversión,Confirmado,Banco
+2027-02-10,Pago,9000000,Seguros,Seguro anual del estadio y responsabilidad civil,Aseguradora,Operativa,Confirmado,Banco
+2027-02-15,Pago,26000000,Préstamos,Cuota 11/12 préstamo Banco Provincia,Banco Provincia,Financiación,Confirmado,Banco
+2027-02-20,Cobro,15000000,Subsidios,Subsidio provincial para obras deportivas - segundo desembolso,Gobierno provincial,Operativa,Probable,Banco
+2027-03-15,Pago,26000000,Préstamos,Cuota 12/12 préstamo Banco Provincia,Banco Provincia,Financiación,Confirmado,Banco
