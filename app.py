@@ -112,6 +112,24 @@ def mostrar_caja_proyectada(k, graficos):
 
 
 def mostrar_presupuesto(pp, ej):
+    if pp:
+        _mostrar_presupuesto_propuesto(pp)
+    if ej:
+        aprobado = ej.get("origen") == "aprobado"
+        st.markdown("**Ejecución: presupuesto aprobado vs. real ordinario del período**" if aprobado
+                    else "**Ejecución: presupuesto armado con datos previos vs. real del período**")
+        filas = [{"Bloque": b, "Rubro": f["rubro"], "Presupuesto": ag.ars_m(f["presupuesto"]), "Real": ag.ars_m(f["real"]),
+                  "Desvío": ag.ars_m(f["desvio"]), "Desvío %": ag.signo_pct(f["desvio_pct"], 0) if f["presupuesto"] else "n/c"}
+                 for b, lista in (("Ingresos", ej["ingresos"]), ("Egresos", ej["egresos"])) for f in lista if max(f["presupuesto"], f["real"]) > 0]
+        filas.append({"Bloque": "Resultado", "Rubro": "Total", "Presupuesto": ag.ars_m(ej["presupuesto_resultado"]), "Real": ag.ars_m(ej["real_resultado"]),
+                      "Desvío": ag.ars_m(ej["desvio_resultado"]), "Desvío %": ag.signo_pct(ej["desvio_resultado_pct"], 0)})
+        st.dataframe(pd.DataFrame(filas), hide_index=True)
+        if aprobado:
+            st.caption(f"Presupuesto aprobado ({ej['rango']}; {ej['meses_cubiertos']} de {ej['meses_periodo']} meses con presupuesto) "
+                       "contra lo real ordinario, sin extraordinarios.")
+
+
+def _mostrar_presupuesto_propuesto(pp):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"Ingresos ({pp['meses']} meses)", ag.ars_m(pp["total_ingresos"]))
     c2.metric("Egresos", ag.ars_m(pp["total_egresos"]))
@@ -129,14 +147,6 @@ def mostrar_presupuesto(pp, ej):
         st.markdown("**Presupuesto por trimestre**")
         st.dataframe(pd.DataFrame([{"Trimestre": t["nombre"], "Ingresos": ag.ars_m(t["ingresos"]), "Egresos": ag.ars_m(t["egresos"]),
                                     "Reserva": ag.ars_m(t["reserva"]), "Resultado": ag.ars_m(t["resultado"])} for t in pp["trimestres"]]), hide_index=True)
-    if ej:
-        st.markdown("**Ejecución: presupuesto armado con datos previos vs. real del período**")
-        filas = [{"Bloque": b, "Rubro": f["rubro"], "Presupuesto": ag.ars_m(f["presupuesto"]), "Real": ag.ars_m(f["real"]),
-                  "Desvío": ag.ars_m(f["desvio"]), "Desvío %": ag.signo_pct(f["desvio_pct"], 0) if f["presupuesto"] else "n/c"}
-                 for b, lista in (("Ingresos", ej["ingresos"]), ("Egresos", ej["egresos"])) for f in lista if max(f["presupuesto"], f["real"]) > 0]
-        filas.append({"Bloque": "Resultado", "Rubro": "Total", "Presupuesto": ag.ars_m(ej["presupuesto_resultado"]), "Real": ag.ars_m(ej["real_resultado"]),
-                      "Desvío": ag.ars_m(ej["desvio_resultado"]), "Desvío %": ag.signo_pct(ej["desvio_resultado_pct"], 0)})
-        st.dataframe(pd.DataFrame(filas), hide_index=True)
     st.caption("Presupuesto prudente: ingresos -5%, egresos +5% y reserva del 5% sobre la tendencia de cada rubro. "
                "Es una propuesta elaborada a partir de los datos, no un presupuesto aprobado.")
 
@@ -233,9 +243,14 @@ with st.sidebar:
                                      help="Se suma a las proyecciones fijas de 3, 6 y 12 meses.")
         metodo = st.selectbox("Método de proyección", list(ag.METODOS), format_func=lambda m: ag.METODOS[m].capitalize())
         meses_ppto = st.selectbox("Meses del presupuesto", [12, 6, 3])
+        st.subheader("4. Control y privacidad")
+        sin_nombres = st.checkbox("Ocultar nombres de socios", value=False,
+                                  help="El informe (y el PDF que se envía por correo) muestra solo el número de socio. Recomendado si el PDF sale del club (Ley 25.326).")
+        validado_por = st.text_input("Validado por (opcional)", placeholder="Nombre de quien revisó el informe",
+                                     help="Queda escrito en el PDF y en el registro de informes.")
         generar = st.button("Generar informe", type="primary")
     else:
-        proy_extra, metodo, meses_ppto, detalle = 0, "tendencia", 12, "completo"
+        proy_extra, metodo, meses_ppto, detalle, sin_nombres, validado_por = 0, "tendencia", 12, "completo", False, ""
         generar = False
 
 # ----------------------------------------------------------------------------
@@ -245,7 +260,8 @@ if generar and datos is not None:
     try:
         with st.spinner("Calculando indicadores y redactando el informe..."):
             clave = elegido[1]
-            k = ag.calcular_kpis(datos, tipo, clave, int(proy_extra) or None, metodo, int(meses_ppto))
+            k = ag.calcular_kpis(datos, tipo, clave, int(proy_extra) or None, metodo, int(meses_ppto), anonimo=bool(sin_nombres))
+            k["trazabilidad"]["validado_por"] = str(validado_por).strip()
             a = ag.generar_analisis(k)
             carpeta = tempfile.mkdtemp()
             graficos = ag.generar_graficos(k, carpeta)
@@ -254,7 +270,7 @@ if generar and datos is not None:
             ag.construir_pdf(k, a, ruta_pdf, logo, graficos, detalle)
             with open(ruta_pdf, "rb") as f:
                 contenido_pdf = f.read()
-            ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a)
+            ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a, detalle)
         st.session_state["informe"] = {"k": k, "a": a, "graficos": graficos,
                                        "pdf": contenido_pdf, "nombre": f"Reporte_{tipo}_{clave}" + ("_resumen" if detalle == "resumido" else "") + ".pdf"}
     except Exception as e:
@@ -346,13 +362,13 @@ with tab_inf:
         sec(f"Los {len(dd['top'])} mayores deudores")
         st.write(a["deudores"])
         if dd["top"]:
-            st.dataframe(pd.DataFrame([{"#": r["puesto"], "Socio": f"{r['socio']} (N° {r['id']})", "Estado": r["estado"],
+            st.dataframe(pd.DataFrame([{"#": r["puesto"], "Socio": ag.etq_socio(r, True), "Estado": r["estado"],
                                         "Meses impagos": r["meses_impagos"], "Deuda estimada": r["deuda"],
                                         "Último pago": r["ultimo_pago"]} for r in dd["top"]]), hide_index=True)
         sec("Presupuesto")
         st.write(a["presupuesto"])
-        if k.get("presupuesto"):
-            mostrar_presupuesto(k["presupuesto"], k.get("ejecucion"))
+        if k.get("presupuesto") or k.get("ejecucion"):
+            mostrar_presupuesto(k.get("presupuesto"), k.get("ejecucion"))
         sec("Puntos de atención")
         for x in a["alertas"]:
             st.markdown(f"- {x}")
@@ -418,6 +434,9 @@ with tab_socios:
         hasta_s = pd.Timestamp(inf["k"]["periodo"]["hasta"]) if inf else ag.rango_datos(datos)[1]
         cuenta = ag.estado_cuenta_socios(datos, hasta_s)
         con_deuda = cuenta[cuenta["Deuda_estimada"] > 0]
+        oculto = bool(inf and inf["k"].get("anonimo"))
+        if oculto:
+            st.info("Se ocultaron los nombres de los socios (opción de privacidad del informe actual).")
         st.caption(f"Estado de cuenta de **todos** los socios al {hasta_s:%d/%m/%Y}. Deuda estimada = meses sin pago por la "
                    "cuota promedio del club ese mes (no es una deuda contable).")
         s1, s2, s3, s4 = st.columns(4)
@@ -429,6 +448,8 @@ with tab_socios:
 
         def vista(df):
             v = df.copy()
+            if oculto and "Socio" in v.columns:
+                v = v.drop(columns=["Socio"])
             v["Fecha_Alta"] = v["Fecha_Alta"].dt.strftime("%d/%m/%Y")
             v["Ultimo_pago"] = v["Ultimo_pago"].dt.strftime("%d/%m/%Y").fillna("sin pagos")
             return v.rename(columns={"Fecha_Alta": "Alta", "Meses_esperados": "Meses esperados", "Meses_pagados": "Meses pagados",
@@ -476,6 +497,14 @@ with tab_datos:
         avisos = list(q.get("avisos_carga", [])) + (k["caja"]["avisos"] if k.get("caja") else [])
         for av in dict.fromkeys(avisos):
             st.warning(av)
+        tz = k.get("trazabilidad")
+        if tz:
+            st.write(f"- Huella de los datos: `{tz['huella']}` (" + ", ".join(f"{n_}: {c_} filas" for n_, c_ in tz["filas"].items()) + ").")
+        if datos.get("presupuesto_aprobado") is None:
+            st.info("No hay presupuesto aprobado cargado: la ejecución se mide contra un presupuesto armado con datos previos. "
+                    "Para usar el aprobado, sumá la hoja **Presupuesto_Aprobado** (Fecha, Tipo, Categoria, Monto).")
+        elif not (k.get("ejecucion") and k["ejecucion"].get("origen") == "aprobado"):
+            st.info("La hoja Presupuesto_Aprobado no tiene meses dentro del período elegido: no se compara contra el aprobado.")
         if not k.get("caja"):
             st.info("No se muestra el flujo de caja: falta la hoja **Saldos** (fecha, cuenta y saldo inicial). Para el flujo proyectado, "
                     "sumá también la hoja **Compromisos**.")

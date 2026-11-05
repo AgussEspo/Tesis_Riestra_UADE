@@ -4,7 +4,7 @@ Lee los datos del club (Excel, Google Sheets, OneDrive o CSV) y genera:
 - un **informe ejecutivo en PDF** mensual, trimestral o anual, comparado con el período anterior;
 - el **estado de cuenta de todos los socios**, con los 5 mayores deudores;
 - el detalle de **ingresos y egresos extraordinarios**;
-- un **semáforo** de hasta 15 indicadores (verde = bien, amarillo = regular, rojo = mal);
+- un **semáforo** de hasta 16 indicadores (verde = bien, amarillo = regular, rojo = mal);
 - una **proyección** a 3, 6 y 12 meses (más un horizonte opcional a elección, de 1 a 36);
 - un **presupuesto** propuesto por rubro, con su ejecución contra lo real;
 - el **envío del PDF por correo electrónico** directo desde la app (además de descargarlo).
@@ -16,7 +16,7 @@ Lee los datos del club (Excel, Google Sheets, OneDrive o CSV) y genera:
 4. **PDF** con el template del club + **registro** de cada informe y de cada envío por correo.
 
 ## Formato de los datos
-Cuatro tablas obligatorias y dos opcionales (pestañas de un Excel o archivos CSV):
+Cuatro tablas obligatorias y tres opcionales (pestañas de un Excel o archivos CSV):
 
 | Tabla | Columnas obligatorias | Opcionales |
 |---|---|---|
@@ -25,6 +25,7 @@ Cuatro tablas obligatorias y dos opcionales (pestañas de un Excel o archivos CS
 | Ingresos | Fecha, Monto, Categoria | Descripcion, **Tipo** |
 | Egresos | Fecha, Monto, Categoria | Descripcion, **Tipo** |
 | Saldos *(opcional)* | Fecha, Cuenta, Saldo | saldo inicial de cada cuenta (Caja, Banco...) |
+| Presupuesto_Aprobado *(opcional)* | Fecha (primer día del mes), Tipo (Ingreso/Egreso), Categoria, Monto | una fila por mes y categoría, incluida la Cuota social |
 | Compromisos *(opcional)* | Fecha_Vencimiento, Tipo (Cobro/Pago), Monto | Concepto, Actividad, Estado (Confirmado/Probable), Cuenta |
 
 Ingresos y Egresos admiten además las columnas opcionales **Actividad** (Operativa, Inversión, Financiación o
@@ -57,7 +58,7 @@ la cuota promedio que pagó el club ese mes. Se calcula al cierre del período d
 el estado de cuenta de **todos** los socios y se puede descargar en CSV.
 
 ## Semáforo
-Hasta 15 indicadores en 5 grupos, con el criterio visible en el informe. Los umbrales son criterios de gestión orientativos
+Hasta 16 indicadores en 5 grupos, con el criterio visible en el informe. Los umbrales son criterios de gestión orientativos
 (editables en `calcular_semaforo`, en `agente_riestra.py`):
 
 | Grupo | Indicador | Verde | Rojo |
@@ -68,6 +69,7 @@ Hasta 15 indicadores en 5 grupos, con el criterio visible en el informe. Los umb
 | | Egresos vs ingresos (ritmo de crecimiento) | egresos crecen igual o menos | > 5 pts por encima |
 | Estructura | Concentración de ingresos (rubro mayor) | < 30% | > 50% |
 | | Concentración de egresos (rubro mayor) | < 40% | > 60% |
+| | Masa salarial sobre ingresos ordinarios (sueldos y cuerpo técnico) | ≤ 60% | > 80% |
 | | Dependencia de extraordinarios | ≤ 10% del resultado | > 25% |
 | Socios | Morosidad del padrón | ≤ 10% | > 20% |
 | | Tasa de cobro de cuotas | ≥ 90% | < 75% |
@@ -94,8 +96,12 @@ cobertura están en rojo.
 ## Presupuesto
 Se **inventa a partir de los datos**: tendencia de cada rubro (tope +15% / -20% sobre su promedio reciente) con criterio prudente:
 ingresos -5%, egresos +5% y reserva de contingencia del 5% de los egresos. Se elige de 3, 6 o 12 meses (`--presupuesto-meses`) y se
-muestra por rubro y por trimestre. La **ejecución** arma el mismo presupuesto con los datos anteriores al período y lo compara con lo real
+muestra por rubro y por trimestre. Sin presupuesto aprobado, la **ejecución** arma el mismo presupuesto con los datos anteriores al período y lo compara con lo real
 (solo si hay al menos 3 meses previos). Es una propuesta, no un presupuesto aprobado.
+
+**Presupuesto aprobado:** si el archivo trae la hoja `Presupuesto_Aprobado`, la ejecución se mide contra ese presupuesto y reemplaza al
+armado con datos previos. Se compara con lo real *ordinario* (sin extraordinarios), solo en los meses del período que tienen presupuesto
+cargado, y el informe indica cuántos meses se compararon. Las categorías se emparejan sin distinguir mayúsculas ni tildes.
 
 ## Nivel de detalle
 El PDF puede ser **completo** (todo el detalle) o **resumido** (3 páginas: cifras clave, evolución, flujo de caja, puntos de atención,
@@ -149,10 +155,17 @@ y, si podés, `EMAIL_DOMINIOS_PERMITIDOS`.
 ## Privacidad
 El análisis se redacta localmente: los datos no se envían a ningún servicio de IA. Si se envía el PDF por correo, el informe
 (que incluye nombres de socios en el detalle de deudores) pasa por el servidor de correo configurado y llega a los destinatarios
-indicados. Con datos reales conviene anonimizarlos o informar a los socios.
+indicados. **Opción "Ocultar nombres de socios"** (en la app, o `--sin-nombres` por línea de comandos): el informe, el PDF y el correo
+muestran solo el número de socio. Con datos reales conviene usarla, mantener el repositorio privado y no subir datos personales a GitHub
+(Ley 25.326 de Protección de Datos Personales).
 
 ## Seguimiento
-- Pestaña **Registro**: cada informe generado (fecha, fuente, período, cifras, resumen) y cada envío por correo. En Streamlit Community
+- Pestaña **Registro**: cada informe generado (fecha, fuente, período, cifras, nivel de detalle, si se ocultaron nombres, huella de los datos,
+  quién lo validó y resumen) y cada envío por correo.
+- **Huella de los datos:** código corto (SHA-256) del contenido de todas las tablas usadas. No depende del orden de filas ni de columnas
+  ni de si el origen es Excel o CSV: dos informes con la misma huella se generaron con los mismos datos. Figura en las notas del PDF y en el registro.
+- **Validado por:** campo opcional (`--validado-por` por línea de comandos) que deja escrito en el PDF y en el registro quién revisó el informe.
+  Si está vacío, el PDF aclara que no hay validación profesional registrada. En Streamlit Community
   Cloud los archivos se reinician cuando la app se reinicia: descargalos.
 
 ## Estructura del código

@@ -37,6 +37,8 @@ from xml.sax.saxutils import escape
 import pandas as pd
 
 import flujo_caja as fc
+import hashlib
+import numbers
 import planificacion as pl
 import matplotlib
 
@@ -146,6 +148,7 @@ ALIAS_COL = {
     "descripcion": "Descripcion", "detalle": "Descripcion", "concepto": "Descripcion", "tipo": "Tipo",
     "actividad": "Actividad", "cuenta": "Cuenta", "saldo": "Saldo", "observacion": "Observacion",
     "fecha_vencimiento": "Fecha_Vencimiento", "vencimiento": "Fecha_Vencimiento", "contraparte": "Contraparte",
+    "mes": "Fecha", "periodo": "Fecha",
 }
 ALIAS_HOJA = {
     "socios": "Socios", "pago_cuota_social": "Pago_Cuota_Social", "pagos_cuota_social": "Pago_Cuota_Social",
@@ -153,9 +156,15 @@ ALIAS_HOJA = {
     "ingresos": "Ingresos", "egresos": "Egresos", "gastos": "Egresos",
     "saldos": "Saldos", "saldo": "Saldos", "saldos_iniciales": "Saldos",
     "compromisos": "Compromisos", "vencimientos": "Compromisos",
+    "presupuesto_aprobado": "Presupuesto_Aprobado", "presupuesto": "Presupuesto_Aprobado", "ppto": "Presupuesto_Aprobado",
+    "presupuesto_anual": "Presupuesto_Aprobado",
 }
 # Hojas opcionales (flujo de caja) y sus columnas obligatorias cuando están presentes
-COLUMNAS_OPCIONALES = {"Saldos": ["Fecha", "Cuenta", "Saldo"], "Compromisos": ["Fecha_Vencimiento", "Tipo", "Monto"]}
+COLUMNAS_OPCIONALES = {"Saldos": ["Fecha", "Cuenta", "Saldo"], "Compromisos": ["Fecha_Vencimiento", "Tipo", "Monto"],
+                       "Presupuesto_Aprobado": ["Fecha", "Tipo", "Categoria", "Monto"]}
+# Rubros de egreso que forman la masa salarial (se busca la palabra dentro del nombre de la categoría)
+PALABRAS_SALARIO = ("sueldo", "salario", "remuneracion", "cuerpo_tecnico")
+SALARIO_VERDE, SALARIO_ROJO = 0.60, 0.80
 # Palabras que marcan un movimiento como extraordinario (además de la regla de no recurrencia)
 PALABRAS_EXTRA = ("extraordinari", "streamer", "amistoso", "excepcional", "venta de jugador", "pase de jugador",
                   "indemniz", "multa", "donacion", "subsidio", "premio")
@@ -295,6 +304,22 @@ def preparar_datos(hojas):
                                  if "Estado" in compromisos.columns else "Confirmado")
         if "Cuenta" in compromisos.columns:
             compromisos["Cuenta"] = fc.normalizar_cuentas(compromisos["Cuenta"])
+    ppto = None
+    if "Presupuesto_Aprobado" in hojas:
+        ppto = hojas["Presupuesto_Aprobado"].copy()
+        n0 = len(ppto)
+        ppto["Fecha"] = _serie_fecha(ppto["Fecha"])
+        ppto["Monto"] = _serie_numerica(ppto["Monto"])
+        tn = ppto["Tipo"].map(lambda v: "Ingreso" if _norm(v).startswith("ing") else ("Egreso" if _norm(v).startswith(("egr", "gast")) else None))
+        ppto["Tipo"] = tn
+        ppto = ppto.dropna(subset=["Fecha", "Monto", "Tipo", "Categoria"]).reset_index(drop=True)
+        ppto["Categoria"] = ppto["Categoria"].astype(str).str.strip()
+        ppto["mes"] = ppto["Fecha"].dt.to_period("M")
+        if len(ppto) < n0:
+            avisos.append(f"Se descartaron {n0 - len(ppto)} filas de Presupuesto_Aprobado con fecha, tipo (Ingreso/Egreso), categoría o monto inválidos.")
+        if ppto.empty:
+            ppto = None
+            avisos.append("La hoja Presupuesto_Aprobado no tiene filas válidas: no se compara contra el presupuesto aprobado.")
     if saldos is None and (ing["Actividad"] != fc.ACT_OPERATIVA).any():
         avisos.append("Hay movimientos de inversión, financiación o transferencias, pero falta la hoja Saldos: "
                       "no se puede armar el flujo de caja (el resultado del período sí se calcula).")
@@ -304,7 +329,28 @@ def preparar_datos(hojas):
     egr = egr[egr["Actividad"] == fc.ACT_OPERATIVA].copy()
     if min(len(pagos), len(ing), len(egr)) == 0:
         raise ValueError("Alguna de las tablas de movimientos no tiene datos válidos (revisá fechas y montos).")
-    return {"socios": socios, "pagos": pagos, "ing": marcar_extraordinarios(ing), "egr": marcar_extraordinarios(egr), "caja": caja}
+    return {"socios": socios, "pagos": pagos, "ing": marcar_extraordinarios(ing), "egr": marcar_extraordinarios(egr), "caja": caja,
+            "presupuesto_aprobado": ppto}
+
+
+def huella_datos(datos):
+    """Huella (SHA-256 abreviada) del contenido normalizado de todas las tablas usadas: permite saber con qué versión de los
+    datos se generó cada informe. No depende del orden de filas ni de columnas ni del formato del archivo de origen."""
+    caja = datos.get("caja") or {}
+    tablas = [("socios", datos["socios"]), ("pagos", datos["pagos"]), ("ingresos", caja.get("ing", datos["ing"])),
+              ("egresos", caja.get("egr", datos["egr"])), ("saldos", caja.get("saldos")), ("compromisos", caja.get("compromisos")),
+              ("presupuesto", datos.get("presupuesto_aprobado"))]
+    h, filas = hashlib.sha256(), {}
+    for nombre, df in tablas:
+        if df is None:
+            continue
+        d = df[sorted(c for c in df.columns if c not in ("extraordinario", "motivo_extra", "mes"))].copy()
+        for c in d.columns:
+            d[c] = d[c].map(lambda v: "" if pd.isna(v) else (f"{float(v):.2f}" if isinstance(v, numbers.Real) and not isinstance(v, bool) else str(v)))
+        d = d.sort_values(list(d.columns)).reset_index(drop=True)
+        h.update(nombre.encode() + d.to_csv(index=False).encode("utf-8"))
+        filas[nombre] = int(len(d))
+    return {"huella": h.hexdigest()[:12].upper(), "filas": filas}
 
 
 def cargar_excel(fuente):
@@ -330,7 +376,7 @@ def _leer_csv(contenido):
 
 def _tabla_de_csv(nombre, df):
     n = _norm(os.path.splitext(os.path.basename(nombre))[0])
-    for clave, tabla in (("saldo", "Saldos"), ("compromiso", "Compromisos"), ("vencimiento", "Compromisos"),
+    for clave, tabla in (("presupuesto", "Presupuesto_Aprobado"), ("ppto", "Presupuesto_Aprobado"), ("saldo", "Saldos"), ("compromiso", "Compromisos"), ("vencimiento", "Compromisos"),
                          ("ingreso", "Ingresos"), ("egreso", "Egresos"), ("gasto", "Egresos"),
                          ("pago", "Pago_Cuota_Social"), ("cuota", "Pago_Cuota_Social"), ("socio", "Socios")):
         if clave in n:
@@ -341,7 +387,7 @@ def _tabla_de_csv(nombre, df):
     if {"ID_Socio", "Monto", "Fecha"} <= cols:
         return "Pago_Cuota_Social"
     raise ValueError(f"No pude identificar qué tabla es '{nombre}'. Nombrá el archivo con la palabra "
-                     f"'socios', 'pagos', 'ingresos' o 'egresos' (y, de forma opcional, 'saldos' o 'compromisos').")
+                     f"'socios', 'pagos', 'ingresos' o 'egresos' (y, de forma opcional, 'saldos', 'compromisos' o 'presupuesto').")
 
 
 def cargar_archivos(items):
@@ -552,7 +598,7 @@ def estado_cuenta_socios(datos, hasta=None):
     return df.sort_values(["Deuda_estimada", "Meses_impagos", "ID_Socio"], ascending=[False, False, True]).reset_index(drop=True)
 
 
-def _resumen_deudores(datos, hasta, top=5):
+def _resumen_deudores(datos, hasta, top=5, anonimo=False):
     df = estado_cuenta_socios(datos, hasta)
     fmin, _ = rango_datos(datos)
     con = df[df["Deuda_estimada"] > 0]
@@ -562,13 +608,13 @@ def _resumen_deudores(datos, hasta, top=5):
         "al_cierre_de": pd.Timestamp(hasta).strftime("%Y-%m-%d"),
         "calculada_desde": f"{MESES[fmin.month - 1]} {fmin.year}",
         "total_socios": int(len(df)), "socios_con_deuda": int(len(con)),
-        "deuda_total": total,
+        "deuda_total": total, "anonimo": bool(anonimo),
         "deuda_morosos": int(df.loc[df["Estado"] == "Moroso", "Deuda_estimada"].sum()),
         "deuda_activos": int(df.loc[df["Estado"] == "Activo", "Deuda_estimada"].sum()),
         "participacion_top": float(primeros["Deuda_estimada"].sum() / total) if total else 0.0,
         "top": [{
             "puesto": i + 1, "id": int(r["ID_Socio"]) if str(r["ID_Socio"]).isdigit() else str(r["ID_Socio"]),
-            "socio": r["Socio"], "estado": r["Estado"], "meses_impagos": int(r["Meses_impagos"]),
+            "socio": "" if anonimo else r["Socio"], "estado": r["Estado"], "meses_impagos": int(r["Meses_impagos"]),
             "deuda": int(r["Deuda_estimada"]),
             "ultimo_pago": r["Ultimo_pago"].strftime("%d/%m/%Y") if pd.notna(r["Ultimo_pago"]) else "sin pagos",
         } for i, (_, r) in enumerate(primeros.iterrows())],
@@ -667,7 +713,58 @@ def calcular_planificacion(datos, hasta, desde=None, extra=None, metodo="tendenc
             b = pl.presupuesto(antes_i, antes_e, len(real_i))
             if b:
                 out["ejecucion"] = pl.ejecucion(b, real_i.sum().to_dict(), real_e.sum().to_dict())
+                out["ejecucion"]["origen"] = "previo"
+        aprobada = ejecucion_aprobada(datos, desde, hasta)
+        if aprobada:  # si hay presupuesto aprobado, manda sobre el armado con datos previos
+            out["ejecucion"] = aprobada
     return out
+
+
+def ejecucion_aprobada(datos, desde, hasta):
+    """Compara el presupuesto aprobado (hoja Presupuesto_Aprobado) con lo real ORDINARIO del período, mes por mes con presupuesto.
+    Devuelve None si no hay hoja o ningún mes del período tiene presupuesto."""
+    pa = datos.get("presupuesto_aprobado")
+    if pa is None:
+        return None
+    hasta = pd.Timestamp(hasta)
+    ultimo = hasta.to_period("M")
+    if hasta.day < 20 and hasta < hasta + pd.offsets.MonthEnd(0):
+        ultimo = ultimo - 1
+    desde = max(pd.Timestamp(desde), rango_datos(datos)[0])  # el período nominal puede empezar antes del primer dato
+    meses = list(pd.period_range(desde.to_period("M"), ultimo, freq="M"))
+    cubiertos = [m for m in meses if (pa["mes"] == m).any()]
+    if not cubiertos:
+        return None
+    b = pa[pa["mes"].isin(cubiertos)]
+    nombre = {}
+    for cat in b["Categoria"]:
+        nombre.setdefault(_norm(cat), cat)
+
+    def real(df):
+        d = df[df["Fecha"].dt.to_period("M").isin(cubiertos) & ~df["extraordinario"]]
+        out = {}
+        for cat, v in d.groupby("Categoria")["Monto"].sum().items():
+            out[nombre.get(_norm(cat), str(cat))] = out.get(nombre.get(_norm(cat), str(cat)), 0.0) + float(v)
+        return out
+    real_i, real_e = real(datos["ing"]), real(datos["egr"])
+    pg = datos["pagos"]
+    cuota = float(pg[pg["Fecha"].dt.to_period("M").isin(cubiertos)]["Monto"].sum())
+    if cuota:
+        real_i[nombre.get(_norm("Cuota social"), "Cuota social")] = cuota
+
+    def filas(tipo):
+        g = b[b["Tipo"] == tipo].groupby("Categoria")["Monto"].sum()
+        acc = {}
+        for cat, v in g.items():
+            acc[nombre[_norm(cat)]] = acc.get(nombre[_norm(cat)], 0.0) + float(v)
+        return [{"rubro": c, "total": v} for c, v in sorted(acc.items(), key=lambda kv: -kv[1])]
+    fi, fe = filas("Ingreso"), filas("Egreso")
+    ti, te = sum(f["total"] for f in fi), sum(f["total"] for f in fe)
+    ej = pl.ejecucion({"meses": len(cubiertos), "filas_ingresos": fi, "filas_egresos": fe, "total_ingresos": ti,
+                       "total_egresos": te, "resultado_operativo": ti - te}, real_i, real_e)
+    ej.update({"origen": "aprobado", "meses_cubiertos": len(cubiertos), "meses_periodo": len(meses),
+               "rango": (pl.etiqueta_mes(cubiertos[0]) + (f" a {pl.etiqueta_mes(cubiertos[-1])}" if len(cubiertos) > 1 else ""))})
+    return ej
 
 
 def _estado(v, ok, mal, mayor_mejor=True):
@@ -677,7 +774,7 @@ def _estado(v, ok, mal, mayor_mejor=True):
 
 
 def calcular_semaforo(k):
-    """Semáforo de hasta 15 indicadores con umbrales explícitos (verde = bien, amarillo = regular, rojo = mal).
+    """Semáforo de hasta 16 indicadores con umbrales explícitos (verde = bien, amarillo = regular, rojo = mal).
     Los indicadores que no se pueden calcular por falta de datos simplemente no se incluyen."""
     t, s, c, x, d = k["totales"], k["socios"], k["comparacion"], k["extraordinarios"], k["deudores"]
     pr, ej = k.get("proyeccion"), k.get("ejecucion")
@@ -701,6 +798,10 @@ def calcular_semaforo(k):
         _estado(ic[0][1] / t["ingresos"], 0.30, 0.50, False), "Verde < 30% · Rojo > 50% en un solo rubro")
     add("Estructura", "Concentración de egresos", f"{ec[0][0]}: {pct(ec[0][1] / t['egresos'])}",
         _estado(ec[0][1] / t["egresos"], 0.40, 0.60, False), "Verde < 40% · Rojo > 60% en un solo rubro")
+    ms = k.get("masa_salarial")
+    if ms:
+        add("Estructura", "Masa salarial sobre ingresos", pct(ms["sobre_ingresos"], 0), _estado(ms["sobre_ingresos"], SALARIO_VERDE, SALARIO_ROJO, False),
+            "Sueldos y cuerpo técnico sobre ingresos ordinarios: Verde ≤ 60% · Rojo > 80%")
     pe = abs(x["peso_en_resultado"]) if x["cantidad"] else 0.0
     add("Estructura", "Dependencia de extraordinarios", pct(pe), _estado(pe, 0.10, 0.25, False),
         "Verde ≤ 10% del resultado · Rojo > 25%")
@@ -719,7 +820,8 @@ def calcular_semaforo(k):
             "Verde: positivo aun en el escenario pesimista · Rojo: resultado negativo")
     if ej:
         add("Futuro", "Ejecución presupuestaria", signo_pct(ej["desvio_resultado_pct"]), _estado(ej["desvio_resultado_pct"], -0.05, -0.15),
-            "Resultado real vs presupuesto previo: Verde ≥ -5% · Rojo < -15%")
+            ("Resultado real vs presupuesto aprobado: Verde ≥ -5% · Rojo < -15%" if ej.get("origen") == "aprobado"
+         else "Resultado real vs presupuesto previo: Verde ≥ -5% · Rojo < -15%"))
     cj = k.get("caja")
     if cj:
         cob_c = cj["periodo"].get("cobertura")
@@ -788,7 +890,7 @@ def _completar_planificacion(k, datos, hasta, desde_periodo, extra, metodo, mese
     return k
 
 
-def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia", meses_presupuesto=12):
+def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia", meses_presupuesto=12, anonimo=False):
     socios = datos["socios"]
     fmin, fmax = rango_datos(datos)
     desde_nom, hasta_nom, n_esp = rango_periodo(tipo, clave)
@@ -864,7 +966,9 @@ def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia",
             "tasa_cobro_promedio": float(sum(x["tasa_cobro"] for x in mensual) / len(mensual)),
         },
         "extraordinarios": _resumen_extraordinarios(ing, egr, int(resultado)),
-        "deudores": _resumen_deudores(datos, hasta),
+        "deudores": _resumen_deudores(datos, hasta, anonimo=anonimo),
+        "anonimo": bool(anonimo),
+        "trazabilidad": dict(huella_datos(datos), validado_por=""),
         "calidad_datos": {
             "pagos_previos_al_alta": int((chk["Fecha"] < chk["Fecha_Alta"]).sum()),
             "morosos_con_pagos": int(pagos[pagos["ID_Socio"].isin(ids_morosos)]["ID_Socio"].nunique()),
@@ -873,6 +977,10 @@ def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia",
             "avisos_carga": list((datos.get("caja") or {}).get("avisos", [])),
         },
     }
+    sal = {c: v for c, v in egr_cat.items() if any(p_ in _norm(c) for p_ in PALABRAS_SALARIO)}
+    ing_ord = ing_total - k["extraordinarios"]["total_ingresos"]
+    k["masa_salarial"] = ({"monto": sum(sal.values()), "rubros": sal, "ingresos_ordinarios": ing_ord,
+                           "sobre_ingresos": sum(sal.values()) / ing_ord} if sal and ing_ord > 0 else None)
     if len(meses) == 1:  # informe mensual: detalle de movimientos
         def movs(df):
             cols = [c for c in ("Categoria", "Descripcion") if c in df.columns]
@@ -891,6 +999,13 @@ def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia",
 # ----------------------------------------------------------------------------
 def _lista_y(items):
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " y " + items[-1]
+
+
+def etq_socio(r, con_n=False):
+    """Nombre del socio para mostrar. En modo anónimo no hay nombre: solo el número de socio."""
+    if not r.get("socio"):
+        return f"Socio N° {r['id']}"
+    return f"{r['socio']} (N° {r['id']})" if con_n else r["socio"]
 
 
 def analisis_local(k):
@@ -919,6 +1034,10 @@ def analisis_local(k):
            f"({pct(ec[0][1] / t['egresos'])} del gasto), seguido por {ec[1][0]} ({pct(ec[1][1] / t['egresos'])}). ")
     if ec[0][1] / t["egresos"] >= 0.50:
         egr += "La estructura de costos depende en buena medida de ese rubro. "
+    ms = k.get("masa_salarial")
+    if ms:
+        egr += (f"La masa salarial ({_lista_y(list(ms['rubros']))}) suma {ars_m(ms['monto'])} y equivale al {pct(ms['sobre_ingresos'], 0)} "
+                f"de los ingresos ordinarios. ")
     if c:
         egr += f"Respecto de {ref}, los egresos {sube(c['var_egresos'])} {pct(abs(c['var_egresos']))}."
 
@@ -948,7 +1067,7 @@ def analisis_local(k):
         deu = f"Al cierre del período ningún socio registra cuotas impagas."
     else:
         top = d["top"]
-        nombres = _lista_y([f"{r['socio']} ({ars(r['deuda'])})" for r in top])
+        nombres = _lista_y([f"{etq_socio(r)} ({ars(r['deuda'])})" for r in top])
         deu = (f"Al cierre del período, {d['socios_con_deuda']} de {d['total_socios']} socios registran cuotas impagas, con una deuda "
                f"estimada total de {ars(d['deuda_total'])}. Los {len(top)} mayores deudores son {nombres} y concentran el "
                f"{pct(d['participacion_top'])} de esa deuda. ")
@@ -1009,12 +1128,18 @@ def analisis_local(k):
                   f"{pct(c_['prudencia_ingresos'], 0)} por debajo y egresos {pct(c_['prudencia_egresos'], 0)} por encima. "
                   f"El mayor ingreso presupuestado es {pp['filas_ingresos'][0]['rubro']} ({ars_m(pp['filas_ingresos'][0]['total'])}) y el mayor egreso es "
                   f"{pp['filas_egresos'][0]['rubro']} ({ars_m(pp['filas_egresos'][0]['total'])}). ")
-        if ej:
-            pres_t += (f"Aplicando el mismo criterio con los datos previos, el resultado real del período ({ars_m(ej['real_resultado'])}) "
-                       f"{'superó' if ej['desvio_resultado'] >= 0 else 'quedó por debajo de'} lo presupuestado ({ars_m(ej['presupuesto_resultado'])}) "
-                       f"en {pct(abs(ej['desvio_resultado_pct']))}.")
-        else:
-            pres_t += "No hay historial previo suficiente para medir la ejecución de este presupuesto en el período."
+    if ej and ej.get("origen") == "aprobado":
+        cob_ = (f" ({ej['meses_cubiertos']} de {ej['meses_periodo']} meses del período tienen presupuesto)" if ej["meses_cubiertos"] < ej["meses_periodo"] else "")
+        pres_t += ((" " if pp else "") + f"Frente al presupuesto aprobado{cob_}, el resultado real ordinario del período ({ars_m(ej['real_resultado'])}) "
+                   f"{'superó' if ej['desvio_resultado'] >= 0 else 'quedó por debajo de'} lo presupuestado ({ars_m(ej['presupuesto_resultado'])}) "
+                   f"en {pct(abs(ej['desvio_resultado_pct']))}. Los ingresos reales fueron {ars_m(ej['real_ingresos'])} contra {ars_m(ej['presupuesto_ingresos'])} "
+                   f"presupuestados y los egresos {ars_m(ej['real_egresos'])} contra {ars_m(ej['presupuesto_egresos'])}.")
+    elif pp and ej:
+        pres_t += (f"Aplicando el mismo criterio con los datos previos, el resultado real del período ({ars_m(ej['real_resultado'])}) "
+                   f"{'superó' if ej['desvio_resultado'] >= 0 else 'quedó por debajo de'} lo presupuestado ({ars_m(ej['presupuesto_resultado'])}) "
+                   f"en {pct(abs(ej['desvio_resultado_pct']))}.")
+    elif pp:
+        pres_t += "No hay historial previo suficiente para medir la ejecución de este presupuesto en el período."
 
     # ---- flujo de caja (solo si el archivo trae la hoja Saldos)
     cj = k.get("caja")
@@ -1092,6 +1217,9 @@ def analisis_local(k):
     if ec[0][1] / t["egresos"] >= 0.50:
         alertas.append(f"{ec[0][0]} concentra el {pct(ec[0][1] / t['egresos'])} del gasto, lo que vuelve poco flexible la estructura de costos.")
         temas.append(f"el peso de {ec[0][0]} en el gasto")
+    if ms and ms["sobre_ingresos"] > SALARIO_VERDE:
+        alertas.append(f"La masa salarial absorbe el {pct(ms['sobre_ingresos'], 0)} de los ingresos ordinarios (referencia: hasta {pct(SALARIO_VERDE, 0)}).")
+        temas.append("el peso de la masa salarial")
     if c and c["var_egresos"] > c["var_ingresos"] and c["var_egresos"] > 0:
         alertas.append(f"Los egresos crecen más rápido que los ingresos respecto de {ref} ({signo_pct(c['var_egresos'])} vs {signo_pct(c['var_ingresos'])}).")
         temas.append("el ritmo de crecimiento de los egresos")
@@ -1134,6 +1262,8 @@ def analisis_local(k):
                         f"{len(pj['serie'])} meses) contra el saldo de caja proyectado, para no tensionar la liquidez.")
     reco.append("Destinar parte del superávit a un fondo de reserva y a inversión en infraestructura e inferiores."
                 if sup else "Definir un plan de reducción de gastos y refuerzo de ingresos para revertir el déficit.")
+    if ej and ej.get("origen") == "aprobado" and abs(ej["desvio_resultado_pct"]) > 0.15:
+        reco.append("Analizar con la Comisión Directiva los desvíos más grandes contra el presupuesto aprobado y, si corresponde, reformularlo.")
     if pp:
         reco.append(f"Tomar como referencia el presupuesto propuesto a {pp['meses']} meses y controlar mensualmente el desvío por rubro.")
     reco.append("Repetir este reporte periódicamente para monitorear la evolución de los indicadores.")
@@ -1572,7 +1702,7 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
     def tabla_deudores():
         filas = [["#", "Socio", "Estado", "Meses impagos", "Deuda estimada", "Último pago"]]
         for r in d["top"]:
-            filas.append([str(r["puesto"]), Paragraph(escape(f"{r['socio']} (N° {r['id']})"), celda), r["estado"],
+            filas.append([str(r["puesto"]), Paragraph(escape(etq_socio(r, True)), celda), r["estado"],
                           str(r["meses_impagos"]), ars(r["deuda"]), r["ultimo_pago"]])
         tb = Table(filas, colWidths=[ancho * 0.06, ancho * 0.31, ancho * 0.13, ancho * 0.16, ancho * 0.18, ancho * 0.16], repeatRows=1)
         est = [("FONT", (0, 0), (-1, -1), "Helvetica", 8.5), ("BACKGROUND", (0, 0), (-1, 0), NEGRO),
@@ -1850,6 +1980,20 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
                  "de socios que pagaron sobre los socios dados de alta hasta ese mes.")
     if k["periodo"]["tipo"] == "mensual":
         notas.append("En los gráficos, los meses más claros son contexto previo al período del informe.")
+    if k.get("masa_salarial"):
+        notas.append("Masa salarial = rubros de egreso cuyo nombre incluye sueldo, salario, remuneración o cuerpo técnico, sobre los ingresos ordinarios "
+                     f"(sin extraordinarios). Referencia orientativa: verde hasta {pct(SALARIO_VERDE, 0)} y rojo desde {pct(SALARIO_ROJO, 0)}.")
+    if ej and ej.get("origen") == "aprobado":
+        notas.append(f"Presupuesto aprobado: se tomó de la hoja Presupuesto_Aprobado ({ej['rango']}) y se comparó con lo real ordinario del período "
+                     "(sin extraordinarios), solo en los meses que tienen presupuesto cargado.")
+    if k.get("anonimo"):
+        notas.append("Datos personales protegidos: el informe no incluye nombres de socios, solo su número (Ley 25.326).")
+    tz = k["trazabilidad"]
+    traz_notas = [f"Trazabilidad: huella de los datos {tz['huella']} (" + ", ".join(f"{n_}: {c_} filas" for n_, c_ in tz["filas"].items()) + "). "
+                  "Dos informes con la misma huella se generaron con los mismos datos."]
+    traz_notas.append(f"Informe revisado y validado por: {tz['validado_por']}." if tz.get("validado_por")
+                      else "Sin validación profesional registrada: el responsable debe revisar este informe antes de distribuirlo.")
+    notas += traz_notas
     notas.append("Análisis redactado con reglas automáticas a partir de los indicadores calculados.")
 
     # ---- armado: 1. Introducción | 2. Desarrollo | 3. Cierre (las secciones del desarrollo se numeran solas)
@@ -1858,6 +2002,8 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
     def num(titulo):
         return f"2.{next(contador)} {titulo}"
 
+    tit_ej = ("Ejecución: presupuesto aprobado vs. real ordinario del período" if ej and ej.get("origen") == "aprobado"
+              else "Ejecución: presupuesto armado con datos previos vs. real del período")
     story = [NextPageTemplate("resto"), Spacer(1, 0.2 * cm), kpis]
     story += seccion("1. Introducción") + [Paragraph(escape(a["introduccion"]), cuerpo)]
 
@@ -1880,8 +2026,9 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
         notas_res += ["Versión resumida del informe: el detalle de ingresos y egresos por rubro, movimientos extraordinarios, deudores, presupuesto y "
                       "tablas mensuales está en el informe completo.",
                       "Semáforo: los umbrales de cada indicador figuran en la tabla y son criterios de gestión orientativos.",
-                      "Proyecciones y flujo de caja proyectado son estimaciones a partir de los datos, no garantías de resultados.",
-                      "Análisis redactado con reglas automáticas a partir de los indicadores calculados."]
+                      "Proyecciones y flujo de caja proyectado son estimaciones a partir de los datos, no garantías de resultados."]
+        notas_res += traz_notas + (["Datos personales protegidos: el informe no incluye nombres de socios, solo su número (Ley 25.326)."] if k.get("anonimo") else [])
+        notas_res += ["Análisis redactado con reglas automáticas a partir de los indicadores calculados."]
         story.append(KeepTogether(seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
                                   + [subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])
                                   + [Spacer(1, 8), Paragraph("<b>Notas</b>", peq)] + bullets(notas_res, nota)))
@@ -1909,10 +2056,12 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
         if pp.get("trimestres"):
             story += [Spacer(1, 6), KeepTogether([Paragraph("<b>Presupuesto por trimestre</b>", peq), Spacer(1, 2), tabla_trimestres()])]
         if ej:
-            story += [Spacer(1, 6), KeepTogether([Paragraph("<b>Ejecución: presupuesto armado con datos previos vs. real del período</b>", peq), Spacer(1, 2), tabla_ejecucion()])]
+            story += [Spacer(1, 6), KeepTogether([Paragraph(f"<b>{tit_ej}</b>", peq), Spacer(1, 2), tabla_ejecucion()])]
         story.append(Spacer(1, 6))
     else:
         story += [bloque(num("Presupuesto"), a["presupuesto"])]
+        if ej:
+            story += [Spacer(1, 4), KeepTogether([Paragraph(f"<b>{tit_ej}</b>", peq), Spacer(1, 2), tabla_ejecucion()]), Spacer(1, 6)]
     story.append(KeepTogether([subtitulo(num("Puntos de atención"))] + bullets(a["alertas"])))
     story += [Spacer(1, 6), KeepTogether([subtitulo(num("Semáforo de indicadores")), Paragraph(escape(a["semaforo"]), cuerpo), Spacer(1, 5)] + tabla_semaforo()), Spacer(1, 6)]
     if pr:
@@ -1941,14 +2090,17 @@ def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
 # ----------------------------------------------------------------------------
 # 5. REGISTRO DE CORRIDAS (seguimiento)
 # ----------------------------------------------------------------------------
-CAMPOS_REGISTRO = ["fecha_hora", "fuente", "tipo", "periodo", "ingresos", "egresos", "resultado", "resumen"]
+CAMPOS_REGISTRO = ["fecha_hora", "fuente", "tipo", "periodo", "ingresos", "egresos", "resultado", "detalle", "nombres_ocultos",
+                   "huella_datos", "validado_por", "resumen"]
 
 
-def registrar_corrida(ruta, fuente, k, a):
+def registrar_corrida(ruta, fuente, k, a, detalle="completo"):
     fila = {
         "fecha_hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "fuente": fuente,
         "tipo": k["periodo"]["tipo"], "periodo": k["periodo"]["etiqueta"],
         "ingresos": k["totales"]["ingresos"], "egresos": k["totales"]["egresos"], "resultado": k["totales"]["resultado"],
+        "detalle": detalle, "nombres_ocultos": "sí" if k.get("anonimo") else "no",
+        "huella_datos": k["trazabilidad"]["huella"], "validado_por": k["trazabilidad"].get("validado_por", ""),
         "resumen": a["introduccion"],
     }
     try:
@@ -1987,15 +2139,18 @@ def main():
     ap.add_argument("--metodo", choices=list(METODOS), default="tendencia", help="método de proyección")
     ap.add_argument("--presupuesto-meses", type=int, choices=(3, 6, 12), default=12)
     ap.add_argument("--detalle", choices=("completo", "resumido"), default="completo", help="nivel de detalle del PDF")
+    ap.add_argument("--sin-nombres", action="store_true", help="no mostrar nombres de socios (solo su número)")
+    ap.add_argument("--validado-por", default="", help="nombre de quien revisó y validó el informe (queda en el PDF y en el registro)")
     ap.add_argument("--registro", default="registro_corridas.csv")
     args = ap.parse_args()
 
     datos = cargar_desde_url(args.fuente[0]) if args.fuente[0].startswith("http") else cargar_rutas(args.fuente)
     clave = args.periodo or periodos_disponibles(datos)[args.tipo][0][1]
-    k = calcular_kpis(datos, args.tipo, clave, args.proyeccion or None, args.metodo, args.presupuesto_meses)
+    k = calcular_kpis(datos, args.tipo, clave, args.proyeccion or None, args.metodo, args.presupuesto_meses, anonimo=args.sin_nombres)
+    k["trazabilidad"]["validado_por"] = args.validado_por.strip()
     a = generar_analisis(k)
     construir_pdf(k, a, args.salida, args.logo or buscar_logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")), detalle=args.detalle)
-    registrar_corrida(args.registro, " + ".join(args.fuente), k, a)
+    registrar_corrida(args.registro, " + ".join(args.fuente), k, a, args.detalle)
     print(f"Reporte generado: {args.salida}  ({k['periodo']['etiqueta']})")
 
 
