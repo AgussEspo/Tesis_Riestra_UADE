@@ -1,0 +1,144 @@
+Fecha,Tipo,Categoria,Monto
+2026-02-01,Ingreso,Entradas,9570000
+2026-03-01,Ingreso,Entradas,9570000
+2026-04-01,Ingreso,Entradas,9570000
+2026-05-01,Ingreso,Entradas,9570000
+2026-06-01,Ingreso,Entradas,9570000
+2026-07-01,Ingreso,Entradas,9570000
+2026-08-01,Ingreso,Entradas,9570000
+2026-09-01,Ingreso,Entradas,9570000
+2026-10-01,Ingreso,Entradas,9570000
+2026-11-01,Ingreso,Entradas,9570000
+2026-12-01,Ingreso,Entradas,9570000
+2026-02-01,Ingreso,Eventos,6930000
+2026-03-01,Ingreso,Eventos,6930000
+2026-04-01,Ingreso,Eventos,6930000
+2026-05-01,Ingreso,Eventos,6930000
+2026-06-01,Ingreso,Eventos,6930000
+2026-07-01,Ingreso,Eventos,6930000
+2026-08-01,Ingreso,Eventos,6930000
+2026-09-01,Ingreso,Eventos,6930000
+2026-10-01,Ingreso,Eventos,6930000
+2026-11-01,Ingreso,Eventos,6930000
+2026-12-01,Ingreso,Eventos,6930000
+2026-02-01,Ingreso,LPF,58290000
+2026-03-01,Ingreso,LPF,58290000
+2026-04-01,Ingreso,LPF,58290000
+2026-05-01,Ingreso,LPF,58290000
+2026-06-01,Ingreso,LPF,58290000
+2026-07-01,Ingreso,LPF,58290000
+2026-08-01,Ingreso,LPF,58290000
+2026-09-01,Ingreso,LPF,58290000
+2026-10-01,Ingreso,LPF,58290000
+2026-11-01,Ingreso,LPF,58290000
+2026-12-01,Ingreso,LPF,58290000
+2026-02-01,Ingreso,Merchandising,5360000
+2026-03-01,Ingreso,Merchandising,5360000
+2026-04-01,Ingreso,Merchandising,5360000
+2026-05-01,Ingreso,Merchandising,5360000
+2026-06-01,Ingreso,Merchandising,5360000
+2026-07-01,Ingreso,Merchandising,5360000
+2026-08-01,Ingreso,Merchandising,5360000
+2026-09-01,Ingreso,Merchandising,5360000
+2026-10-01,Ingreso,Merchandising,5360000
+2026-11-01,Ingreso,Merchandising,5360000
+2026-12-01,Ingreso,Merchandising,5360000
+2026-02-01,Ingreso,Sponsor,76840000
+2026-03-01,Ingreso,Sponsor,76840000
+2026-04-01,Ingreso,Sponsor,76840000
+2026-05-01,Ingreso,Sponsor,76840000
+2026-06-01,Ingreso,Sponsor,76840000
+2026-07-01,Ingreso,Sponsor,76840000
+2026-08-01,Ingreso,Sponsor,76840000
+2026-09-01,Ingreso,Sponsor,76840000
+2026-10-01,Ingreso,Sponsor,76840000
+2026-11-01,Ingreso,Sponsor,76840000
+2026-12-01,Ingreso,Sponsor,76840000
+2026-02-01,Ingreso,Cuota social,1720000
+2026-03-01,Ingreso,Cuota social,1720000
+2026-04-01,Ingreso,Cuota social,1720000
+2026-05-01,Ingreso,Cuota social,1720000
+2026-06-01,Ingreso,Cuota social,1720000
+2026-07-01,Ingreso,Cuota social,1720000
+2026-08-01,Ingreso,Cuota social,1720000
+2026-09-01,Ingreso,Cuota social,1720000
+2026-10-01,Ingreso,Cuota social,1720000
+2026-11-01,Ingreso,Cuota social,1720000
+2026-12-01,Ingreso,Cuota social,1720000
+2026-02-01,Egreso,Cuerpo Tecnico,9910000
+2026-03-01,Egreso,Cuerpo Tecnico,9910000
+2026-04-01,Egreso,Cuerpo Tecnico,9910000
+2026-05-01,Egreso,Cuerpo Tecnico,9910000
+2026-06-01,Egreso,Cuerpo Tecnico,9910000
+2026-07-01,Egreso,Cuerpo Tecnico,9910000
+2026-08-01,Egreso,Cuerpo Tecnico,9910000
+2026-09-01,Egreso,Cuerpo Tecnico,9910000
+2026-10-01,Egreso,Cuerpo Tecnico,9910000
+2026-11-01,Egreso,Cuerpo Tecnico,9910000
+2026-12-01,Egreso,Cuerpo Tecnico,9910000
+2026-02-01,Egreso,Inferiores,1840000
+2026-03-01,Egreso,Inferiores,1840000
+2026-04-01,Egreso,Inferiores,1840000
+2026-05-01,Egreso,Inferiores,1840000
+2026-06-01,Egreso,Inferiores,1840000
+2026-07-01,Egreso,Inferiores,1840000
+2026-08-01,Egreso,Inferiores,1840000
+2026-09-01,Egreso,Inferiores,1840000
+2026-10-01,Egreso,Inferiores,1840000
+2026-11-01,Egreso,Inferiores,1840000
+2026-12-01,Egreso,Inferiores,1840000
+2026-02-01,Egreso,Mantenimiento Cancha,3220000
+2026-03-01,Egreso,Mantenimiento Cancha,3220000
+2026-04-01,Egreso,Mantenimiento Cancha,3220000
+2026-05-01,Egreso,Mantenimiento Cancha,3220000
+2026-06-01,Egreso,Mantenimiento Cancha,3220000
+2026-07-01,Egreso,Mantenimiento Cancha,3220000
+2026-08-01,Egreso,Mantenimiento Cancha,3220000
+2026-09-01,Egreso,Mantenimiento Cancha,3220000
+2026-10-01,Egreso,Mantenimiento Cancha,3220000
+2026-11-01,Egreso,Mantenimiento Cancha,3220000
+2026-12-01,Egreso,Mantenimiento Cancha,3220000
+2026-02-01,Egreso,Seguridad,2160000
+2026-03-01,Egreso,Seguridad,2160000
+2026-04-01,Egreso,Seguridad,2160000
+2026-05-01,Egreso,Seguridad,2160000
+2026-06-01,Egreso,Seguridad,2160000
+2026-07-01,Egreso,Seguridad,2160000
+2026-08-01,Egreso,Seguridad,2160000
+2026-09-01,Egreso,Seguridad,2160000
+2026-10-01,Egreso,Seguridad,2160000
+2026-11-01,Egreso,Seguridad,2160000
+2026-12-01,Egreso,Seguridad,2160000
+2026-02-01,Egreso,Servicios,2860000
+2026-03-01,Egreso,Servicios,2860000
+2026-04-01,Egreso,Servicios,2860000
+2026-05-01,Egreso,Servicios,2860000
+2026-06-01,Egreso,Servicios,2860000
+2026-07-01,Egreso,Servicios,2860000
+2026-08-01,Egreso,Servicios,2860000
+2026-09-01,Egreso,Servicios,2860000
+2026-10-01,Egreso,Servicios,2860000
+2026-11-01,Egreso,Servicios,2860000
+2026-12-01,Egreso,Servicios,2860000
+2026-02-01,Egreso,Sueldos Jugadores,32020000
+2026-03-01,Egreso,Sueldos Jugadores,32020000
+2026-04-01,Egreso,Sueldos Jugadores,32020000
+2026-05-01,Egreso,Sueldos Jugadores,32020000
+2026-06-01,Egreso,Sueldos Jugadores,32020000
+2026-07-01,Egreso,Sueldos Jugadores,32020000
+2026-08-01,Egreso,Sueldos Jugadores,32020000
+2026-09-01,Egreso,Sueldos Jugadores,32020000
+2026-10-01,Egreso,Sueldos Jugadores,32020000
+2026-11-01,Egreso,Sueldos Jugadores,32020000
+2026-12-01,Egreso,Sueldos Jugadores,32020000
+2026-02-01,Egreso,Vestuarios,1610000
+2026-03-01,Egreso,Vestuarios,1610000
+2026-04-01,Egreso,Vestuarios,1610000
+2026-05-01,Egreso,Vestuarios,1610000
+2026-06-01,Egreso,Vestuarios,1610000
+2026-07-01,Egreso,Vestuarios,1610000
+2026-08-01,Egreso,Vestuarios,1610000
+2026-09-01,Egreso,Vestuarios,1610000
+2026-10-01,Egreso,Vestuarios,1610000
+2026-11-01,Egreso,Vestuarios,1610000
+2026-12-01,Egreso,Vestuarios,1610000
