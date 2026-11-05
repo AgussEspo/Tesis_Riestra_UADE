@@ -4,7 +4,7 @@ Lee los datos del club (Excel, Google Sheets, OneDrive o CSV) y genera:
 - un **informe ejecutivo en PDF** mensual, trimestral o anual, comparado con el período anterior;
 - el **estado de cuenta de todos los socios**, con los 5 mayores deudores;
 - el detalle de **ingresos y egresos extraordinarios**;
-- un **semáforo** de 13 indicadores (verde = bien, amarillo = regular, rojo = mal);
+- un **semáforo** de hasta 15 indicadores (verde = bien, amarillo = regular, rojo = mal);
 - una **proyección** a 3, 6 y 12 meses (más un horizonte opcional a elección, de 1 a 36);
 - un **presupuesto** propuesto por rubro, con su ejecución contra lo real;
 - el **envío del PDF por correo electrónico** directo desde la app (además de descargarlo).
@@ -16,7 +16,7 @@ Lee los datos del club (Excel, Google Sheets, OneDrive o CSV) y genera:
 4. **PDF** con el template del club + **registro** de cada informe y de cada envío por correo.
 
 ## Formato de los datos
-Cuatro tablas (pestañas de un Excel o archivos CSV):
+Cuatro tablas obligatorias y dos opcionales (pestañas de un Excel o archivos CSV):
 
 | Tabla | Columnas obligatorias | Opcionales |
 |---|---|---|
@@ -24,6 +24,18 @@ Cuatro tablas (pestañas de un Excel o archivos CSV):
 | Pago_Cuota_Social | Fecha, ID_Socio, Monto | Socio |
 | Ingresos | Fecha, Monto, Categoria | Descripcion, **Tipo** |
 | Egresos | Fecha, Monto, Categoria | Descripcion, **Tipo** |
+| Saldos *(opcional)* | Fecha, Cuenta, Saldo | saldo inicial de cada cuenta (Caja, Banco...) |
+| Compromisos *(opcional)* | Fecha_Vencimiento, Tipo (Cobro/Pago), Monto | Concepto, Actividad, Estado (Confirmado/Probable), Cuenta |
+
+Ingresos y Egresos admiten además las columnas opcionales **Actividad** (Operativa, Inversión, Financiación o
+Transferencia interna; vacía = Operativa) y **Cuenta** (vacía = Banco).
+
+## Flujo de caja
+Con la hoja **Saldos** el informe suma el **flujo de caja histórico** (saldo inicial, flujos operativo, de inversión y de
+financiación, saldo final por mes y cobertura). Con **Compromisos** suma además el **flujo de caja proyectado**: proyección
+ordinaria + vencimientos futuros no recurrentes, con escenario base, pesimista (sin cobros probables) y optimista
+(sin pagos probables). Solo la actividad *Operativa* forma el resultado; inversión, financiación y transferencias
+entre cuentas propias quedan fuera del resultado y aparecen solo en la caja. Sin la hoja Saldos el informe se genera igual, sin esa sección.
 
 **CSV**: subí los 4 archivos juntos; el nombre de cada uno debe incluir *socios*, *pagos* (o *cuota*), *ingresos* o *egresos*
 (ver `datos_ejemplo/csv/`). Acepta separador coma o punto y coma, UTF-8 o Latin-1, fechas `2026-10-05` o `05/10/2026` y
@@ -45,7 +57,7 @@ la cuota promedio que pagó el club ese mes. Se calcula al cierre del período d
 el estado de cuenta de **todos** los socios y se puede descargar en CSV.
 
 ## Semáforo
-13 indicadores en 4 grupos, con el criterio visible en el informe. Los umbrales son criterios de gestión orientativos
+Hasta 15 indicadores en 5 grupos, con el criterio visible en el informe. Los umbrales son criterios de gestión orientativos
 (editables en `calcular_semaforo`, en `agente_riestra.py`):
 
 | Grupo | Indicador | Verde | Rojo |
@@ -63,6 +75,8 @@ el estado de cuenta de **todos** los socios y se puede descargar en CSV.
 | | Deuda estimada sobre lo cobrado | ≤ 10% | > 25% |
 | Futuro | Resultado proyectado a 3 meses | positivo aun en el escenario pesimista | negativo |
 | | Ejecución presupuestaria | ≥ -5% | < -15% |
+| Caja | Cobertura de caja (meses de egresos) | ≥ 3 meses | < 1 mes |
+| | Saldo de caja proyectado a 6 meses | nunca negativo | negativo en el escenario base |
 
 Lo que está entre verde y rojo es amarillo. Si falta información (por ejemplo, sin período anterior) el indicador **no aparece**
 en el semáforo ni se menciona. Se muestra con círculos de colores (🟢 🟡 🔴). La situación general se resuelve por el puntaje promedio y es **crítica** si el margen o la
@@ -83,9 +97,14 @@ ingresos -5%, egresos +5% y reserva de contingencia del 5% de los egresos. Se el
 muestra por rubro y por trimestre. La **ejecución** arma el mismo presupuesto con los datos anteriores al período y lo compara con lo real
 (solo si hay al menos 3 meses previos). Es una propuesta, no un presupuesto aprobado.
 
+## Nivel de detalle
+El PDF puede ser **completo** (todo el detalle) o **resumido** (3 páginas: cifras clave, evolución, flujo de caja, puntos de atención,
+semáforo, proyección de resultados y de caja, cierre y recomendaciones). En la app se elige con "Nivel de detalle del PDF" y por
+línea de comandos con `--detalle resumido`. La pantalla de la app siempre muestra el informe completo.
+
 ## Orden del informe
-Introducción · Desarrollo (2.1 a 2.10) · Cierre. Hacia el final del desarrollo van el **2.9 Semáforo de indicadores** y el
-**2.10 Proyección**, justo antes del **Cierre**.
+Introducción · Desarrollo (2.1 en adelante; la numeración se ajusta según haya o no flujo de caja) · Cierre. Hacia el final
+del desarrollo van el **Semáforo de indicadores**, la **Proyección** y el **Flujo de caja proyectado**, justo antes del **Cierre**.
 
 ## Envío del PDF por correo
 En la pestaña **Informe**, desplegable **Enviar el PDF por correo electrónico**: se escribe una o más direcciones (hasta 5, separadas
@@ -107,9 +126,9 @@ streamlit run app.py
 ```
 Por línea de comandos (también acepta una carpeta con CSV):
 ```
-python agente_riestra.py datos_ejemplo/Riestra_Tesis_Finanzas_V2.xlsx --tipo trimestral --periodo 2026-T3
+python agente_riestra.py datos_ejemplo/Riestra_Tesis_Finanzas_V3.xlsx --tipo trimestral --periodo 2026-T3
 python agente_riestra.py datos_ejemplo/csv --tipo mensual --periodo 2026-08
-python agente_riestra.py datos_ejemplo/Riestra_Tesis_Finanzas_V2.xlsx --tipo trimestral --periodo 2026-T3 --proyeccion 9 --presupuesto-meses 6
+python agente_riestra.py datos_ejemplo/Riestra_Tesis_Finanzas_V3.xlsx --tipo trimestral --periodo 2026-T3 --proyeccion 9 --presupuesto-meses 6
 ```
 Para probar el envío por correo en local, copiá `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml` y completá los datos SMTP.
 
@@ -137,8 +156,8 @@ indicados. Con datos reales conviene anonimizarlos o informar a los socios.
   Cloud los archivos se reinician cuando la app se reinicia: descargalos.
 
 ## Estructura del código
-`agente_riestra.py` (carga, cálculo, textos, PDF) · `planificacion.py` (matemática de proyección y presupuesto, sin dependencias de la app) ·
+`agente_riestra.py` (carga, cálculo, textos, PDF) · `flujo_caja.py` (flujo de caja histórico y proyectado) · `planificacion.py` (matemática de proyección y presupuesto, sin dependencias de la app) ·
 `correo.py` (envío del PDF por correo) · `app.py` (interfaz Streamlit).
 
 ## Escudo y template
-Escudo: `assets/escudo.png` (o subilo desde la barra lateral). Colores y textos del PDF: función `construir_pdf`.
+Escudo: `assets/escudo.png` . Colores y textos del PDF: función `construir_pdf`.

@@ -16,7 +16,7 @@ import agente_riestra as ag
 import correo
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
-RUTA_EJEMPLO = os.path.join(AQUI, "datos_ejemplo", "Riestra_Tesis_Finanzas_V2.xlsx")
+RUTA_EJEMPLO = os.path.join(AQUI, "datos_ejemplo", "Riestra_Tesis_Finanzas_V3.xlsx")
 RUTA_REGISTRO = os.path.join(AQUI, "registro_corridas.csv")
 RUTA_ENVIOS = os.path.join(AQUI, "registro_envios.csv")
 CARPETA_ASSETS = os.path.join(AQUI, "assets")
@@ -66,6 +66,49 @@ def mostrar_proyeccion_tabla(pr):
                                 "Egresos": ag.ars_m(h["egresos"]), "Resultado": ag.ars_m(h["resultado"]),
                                 "Pesimista": ag.ars_m(h["res_pesimista"]), "Optimista": ag.ars_m(h["res_optimista"]),
                                 "Confiabilidad": h["confiabilidad"]} for h in pr["horizontes"]]), hide_index=True)
+
+
+def mostrar_caja(k, graficos):
+    """Flujo de caja histórico del período."""
+    rp = k["caja"]["periodo"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Saldo inicial", ag.ars_m(rp["saldo_inicial"]))
+    c2.metric("Variación neta", ag.ars_m(rp["neto"]), "operativo + inversión + financiación", delta_color="off")
+    c3.metric("Saldo final", ag.ars_m(rp["saldo_final"]), f"mínimo {ag.ars_m(rp['minimo']['saldo'])}" if rp["meses"] > 1 else None, delta_color="off")
+    cob = rp.get("cobertura")
+    c4.metric("Cobertura de caja", (f"{cob:.1f}".replace(".", ",") + " meses") if cob is not None else "n/c", "de egresos y cuotas de deuda", delta_color="off")
+    mostrar_imagen(graficos["caja"][0])
+    filas = [{"Mes": f["nombre"].capitalize() + ("" if f["en_periodo"] else " (contexto)"), "Saldo inicial": ag.ars_m(f["saldo_inicial"]),
+              "Operativo": ag.ars_m(f["operativo"]), "Inversión": ag.ars_m(f["inversion"]), "Financiación": ag.ars_m(f["financiacion"]),
+              "Variación": ag.ars_m(f["neto"]), "Saldo final": ag.ars_m(f["saldo_final"])} for f in rp["filas"]]
+    if rp["meses"] > 1:
+        filas.append({"Mes": "Total del período", "Saldo inicial": ag.ars_m(rp["saldo_inicial"]), "Operativo": ag.ars_m(rp["operativo"]),
+                      "Inversión": ag.ars_m(rp["inversion"]), "Financiación": ag.ars_m(rp["financiacion"]),
+                      "Variación": ag.ars_m(rp["neto"]), "Saldo final": ag.ars_m(rp["saldo_final"])})
+    st.dataframe(pd.DataFrame(filas), hide_index=True)
+    if len(rp["cuentas_final"]) > 1:
+        st.caption("Saldo final por cuenta: " + " · ".join(f"{c}: {ag.ars_m(v)}" for c, v in rp["cuentas_final"].items()))
+
+
+def mostrar_caja_proyectada(k, graficos):
+    """Flujo de caja proyectado: base, escenarios y compromisos considerados."""
+    pj = k["caja"]["proyeccion"]
+    mostrar_imagen(graficos["caja_proyeccion"][0])
+    st.markdown("**Saldo de caja proyectado por horizonte**")
+    st.dataframe(pd.DataFrame([{"Horizonte": f"{h['meses']} meses", "Hasta": h["hasta"].capitalize(), "Flujo neto": ag.ars_m(h["flujo_neto"]),
+                                "Saldo (base)": ag.ars_m(h["saldo"]), "Pesimista": ag.ars_m(h["saldo_pesimista"]),
+                                "Optimista": ag.ars_m(h["saldo_optimista"]), "Saldo mínimo": ag.ars_m(h["saldo_minimo"])}
+                               for h in pj["horizontes"]]), hide_index=True)
+    st.markdown("**Detalle mes a mes (escenario base)**")
+    st.dataframe(pd.DataFrame([{"Mes": f["nombre"].capitalize(), "Operativo": ag.ars_m(f["operativo"]), "Inversión": ag.ars_m(f["inversion"]),
+                                "Financiación": ag.ars_m(f["financiacion"]), "Variación": ag.ars_m(f["neto"]), "Saldo (base)": ag.ars_m(f["saldo"]),
+                                "Pesimista": ag.ars_m(f["saldo_pesimista"]), "Optimista": ag.ars_m(f["saldo_optimista"])}
+                               for f in pj["serie"][:12]]), hide_index=True)
+    if pj["compromisos"]:
+        with st.expander(f"Compromisos considerados ({len(pj['compromisos'])})"):
+            st.dataframe(pd.DataFrame([{"Fecha": r["fecha"], "Tipo": r["tipo"], "Concepto": r["concepto"], "Actividad": r["actividad"],
+                                        "Estado": r["estado"], "Monto": ag.ars_m(r["monto"])} for r in pj["compromisos"]]), hide_index=True)
+    st.caption("Escenario base: proyección ordinaria más todos los compromisos. Pesimista: sin los cobros probables; optimista: sin los pagos probables.")
 
 
 def mostrar_presupuesto(pp, ej):
@@ -181,6 +224,8 @@ with st.sidebar:
 
         st.subheader("2. Informe")
         tipo = st.radio("Tipo", list(ag.TIPOS), horizontal=True, format_func=str.capitalize)
+        detalle = st.radio("Nivel de detalle del PDF", ["completo", "resumido"], horizontal=True, format_func=str.capitalize,
+                           help="El resumido son 2 o 3 páginas con lo esencial; el completo incluye todo el detalle.")
         opciones = ag.periodos_disponibles(datos)[tipo]
         elegido = st.selectbox("Período", opciones, format_func=lambda o: o[0])
         st.subheader("3. Proyección y presupuesto")
@@ -190,7 +235,7 @@ with st.sidebar:
         meses_ppto = st.selectbox("Meses del presupuesto", [12, 6, 3])
         generar = st.button("Generar informe", type="primary")
     else:
-        proy_extra, metodo, meses_ppto = 0, "tendencia", 12
+        proy_extra, metodo, meses_ppto, detalle = 0, "tendencia", 12, "completo"
         generar = False
 
 # ----------------------------------------------------------------------------
@@ -206,12 +251,12 @@ if generar and datos is not None:
             graficos = ag.generar_graficos(k, carpeta)
             ruta_pdf = os.path.join(carpeta, "informe.pdf")
             logo = ag.buscar_logo(CARPETA_ASSETS)
-            ag.construir_pdf(k, a, ruta_pdf, logo, graficos)
+            ag.construir_pdf(k, a, ruta_pdf, logo, graficos, detalle)
             with open(ruta_pdf, "rb") as f:
                 contenido_pdf = f.read()
             ag.registrar_corrida(RUTA_REGISTRO, st.session_state["fuente_txt"], k, a)
         st.session_state["informe"] = {"k": k, "a": a, "graficos": graficos,
-                                       "pdf": contenido_pdf, "nombre": f"Reporte_{tipo}_{clave}.pdf"}
+                                       "pdf": contenido_pdf, "nombre": f"Reporte_{tipo}_{clave}" + ("_resumen" if detalle == "resumido" else "") + ".pdf"}
     except Exception as e:
         st.error(f"No se pudo generar el informe: {e}")
 
@@ -270,15 +315,21 @@ with tab_inf:
         st.markdown("### 1. Introducción")
         st.write(a["introduccion"])
         st.markdown("### 2. Desarrollo")
-        st.markdown("**2.1 Ingresos**")
+        _n = iter(range(1, 100))
+        sec = lambda titulo: st.markdown(f"**2.{next(_n)} {titulo}**")
+        sec("Ingresos")
         st.write(a["ingresos"])
-        st.markdown("**2.2 Egresos**")
+        sec("Egresos")
         st.write(a["egresos"])
         mostrar_imagen(inf["graficos"]["composicion"][0])
-        st.markdown("**2.3 Resultado y evolución**")
+        sec("Resultado y evolución")
         st.write(a["resultado"])
         mostrar_imagen(inf["graficos"]["evolucion"][0])
-        st.markdown("**2.4 Movimientos extraordinarios**")
+        if k.get("caja"):
+            sec("Flujo de caja")
+            st.write(a["caja"])
+            mostrar_caja(k, inf["graficos"])
+        sec("Movimientos extraordinarios")
         st.write(a["extraordinarios"])
         xs = k["extraordinarios"]
         if xs["cantidad"]:
@@ -288,36 +339,40 @@ with tab_inf:
             e1.metric("Resultado del período", ag.ars_m(t["resultado"]))
             e2.metric("Efecto de extraordinarios", ag.ars_m(xs["neto"]))
             e3.metric("Resultado sin extraordinarios", ag.ars_m(xs["resultado_ordinario"]))
-        st.markdown("**2.5 Socios y cuota social**")
+        sec("Socios y cuota social")
         st.write(a["socios"])
         mostrar_imagen(inf["graficos"]["socios"][0])
         dd = k["deudores"]
-        st.markdown(f"**2.6 Los {len(dd['top'])} mayores deudores**")
+        sec(f"Los {len(dd['top'])} mayores deudores")
         st.write(a["deudores"])
         if dd["top"]:
             st.dataframe(pd.DataFrame([{"#": r["puesto"], "Socio": f"{r['socio']} (N° {r['id']})", "Estado": r["estado"],
                                         "Meses impagos": r["meses_impagos"], "Deuda estimada": r["deuda"],
                                         "Último pago": r["ultimo_pago"]} for r in dd["top"]]), hide_index=True)
-        st.markdown("**2.7 Presupuesto**")
+        sec("Presupuesto")
         st.write(a["presupuesto"])
         if k.get("presupuesto"):
             mostrar_presupuesto(k["presupuesto"], k.get("ejecucion"))
-        st.markdown("**2.8 Puntos de atención**")
+        sec("Puntos de atención")
         for x in a["alertas"]:
             st.markdown(f"- {x}")
         sm = k["semaforo"]
         circ = {"verde": "🟢", "amarillo": "🟡", "rojo": "🔴"}
-        st.markdown("**2.9 Semáforo de indicadores**")
+        sec("Semáforo de indicadores")
         st.write(a["semaforo"])
         st.markdown(f"**Situación general:** {circ[sm['general']]} &nbsp;&nbsp;&nbsp; **Indicadores:** "
                     f"🟢 {sm['conteo']['verde']} &nbsp;&nbsp; 🟡 {sm['conteo']['amarillo']} &nbsp;&nbsp; 🔴 {sm['conteo']['rojo']}")
         st.dataframe(pd.DataFrame([{"Estado": circ[i["estado"]], "Indicador": i["indicador"], "Valor": i["valor"], "Criterio": i["criterio"]}
                                    for i in sm["items"]]), hide_index=True)
-        st.markdown("**2.10 Proyección**")
+        sec("Proyección")
         st.write(a["proyeccion"])
         if k.get("proyeccion"):
             mostrar_imagen(inf["graficos"]["proyeccion"][0])
             mostrar_proyeccion_tabla(k["proyeccion"])
+        if k.get("caja") and k["caja"].get("proyeccion"):
+            st.markdown("**Flujo de caja proyectado**")
+            st.write(a["caja_proyeccion"])
+            mostrar_caja_proyectada(k, inf["graficos"])
         st.markdown("### 3. Cierre")
         st.write(a["cierre"])
         st.markdown("**Recomendaciones**")
@@ -415,6 +470,17 @@ with tab_datos:
             st.write(f"- {q['pagos_previos_al_alta']} pagos tienen fecha anterior al alta del socio.")
         if k["periodo"]["parcial"]:
             st.write("- El período es parcial: solo hay datos de una parte de los meses.")
+        for act, v in q.get("no_operativos", {}).items():
+            det = "" if act == "Transferencia interna" else f" (ingresos {ag.ars_m(v['ingresos'])}, egresos {ag.ars_m(v['egresos'])})"
+            st.write(f"- {v['n']} movimientos de {act.lower()}{det} quedaron fuera del resultado y se informan solo en el flujo de caja.")
+        avisos = list(q.get("avisos_carga", [])) + (k["caja"]["avisos"] if k.get("caja") else [])
+        for av in dict.fromkeys(avisos):
+            st.warning(av)
+        if not k.get("caja"):
+            st.info("No se muestra el flujo de caja: falta la hoja **Saldos** (fecha, cuenta y saldo inicial). Para el flujo proyectado, "
+                    "sumá también la hoja **Compromisos**.")
+        elif k["caja"]["proyeccion"] and not k["caja"].get("hay_compromisos"):
+            st.info("El flujo de caja proyectado no incluye compromisos: falta la hoja **Compromisos** (vencimientos futuros).")
         with st.expander("Indicadores calculados"):
             st.json({c: v for c, v in k.items() if c != "movimientos"})
 

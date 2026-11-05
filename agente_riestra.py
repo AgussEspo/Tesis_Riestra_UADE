@@ -36,6 +36,7 @@ from xml.sax.saxutils import escape
 
 import pandas as pd
 
+import flujo_caja as fc
 import planificacion as pl
 import matplotlib
 
@@ -143,12 +144,18 @@ ALIAS_COL = {
     "fecha_alta": "Fecha_Alta", "alta": "Fecha_Alta", "estado": "Estado", "fecha": "Fecha", "socio": "Socio",
     "monto": "Monto", "importe": "Monto", "categoria": "Categoria", "rubro": "Categoria",
     "descripcion": "Descripcion", "detalle": "Descripcion", "concepto": "Descripcion", "tipo": "Tipo",
+    "actividad": "Actividad", "cuenta": "Cuenta", "saldo": "Saldo", "observacion": "Observacion",
+    "fecha_vencimiento": "Fecha_Vencimiento", "vencimiento": "Fecha_Vencimiento", "contraparte": "Contraparte",
 }
 ALIAS_HOJA = {
     "socios": "Socios", "pago_cuota_social": "Pago_Cuota_Social", "pagos_cuota_social": "Pago_Cuota_Social",
     "pagos": "Pago_Cuota_Social", "pagos_de_cuota": "Pago_Cuota_Social", "cuota_social": "Pago_Cuota_Social",
     "ingresos": "Ingresos", "egresos": "Egresos", "gastos": "Egresos",
+    "saldos": "Saldos", "saldo": "Saldos", "saldos_iniciales": "Saldos",
+    "compromisos": "Compromisos", "vencimientos": "Compromisos",
 }
+# Hojas opcionales (flujo de caja) y sus columnas obligatorias cuando están presentes
+COLUMNAS_OPCIONALES = {"Saldos": ["Fecha", "Cuenta", "Saldo"], "Compromisos": ["Fecha_Vencimiento", "Tipo", "Monto"]}
 # Palabras que marcan un movimiento como extraordinario (además de la regla de no recurrencia)
 PALABRAS_EXTRA = ("extraordinari", "streamer", "amistoso", "excepcional", "venta de jugador", "pase de jugador",
                   "indemniz", "multa", "donacion", "subsidio", "premio")
@@ -225,13 +232,13 @@ def marcar_extraordinarios(df):
 
 
 def preparar_datos(hojas):
-    """Valida hojas/columnas, normaliza formatos y marca movimientos extraordinarios.
-    `hojas` = dict nombre -> DataFrame."""
+    """Valida hojas/columnas, normaliza formatos, separa lo no operativo y marca movimientos extraordinarios.
+    `hojas` = dict nombre -> DataFrame. Hojas opcionales: Saldos y Compromisos (flujo de caja)."""
     hojas = {ALIAS_HOJA.get(_norm(k), str(k).strip()): v for k, v in hojas.items()}
     faltan = [h for h in COLUMNAS if h not in hojas]
     if faltan:
         raise ValueError(f"Faltan estas pestañas/archivos: {', '.join(faltan)}. Se esperan: {', '.join(COLUMNAS)}.")
-    for hoja, cols in COLUMNAS.items():
+    for hoja, cols in list(COLUMNAS.items()) + [(h, c) for h, c in COLUMNAS_OPCIONALES.items() if h in hojas]:
         df = hojas[hoja]
         df.columns = [ALIAS_COL.get(_norm(c), str(c).strip()) for c in df.columns]
         falt = [c for c in cols if c not in df.columns]
@@ -251,9 +258,53 @@ def preparar_datos(hojas):
         d["Fecha"] = _serie_fecha(d["Fecha"])
         d["Monto"] = _serie_numerica(d["Monto"])
         d.dropna(subset=["Fecha", "Monto"], inplace=True)
+    avisos = []
+    # Actividad y cuenta de cada movimiento (si faltan las columnas: todo es operativo y está en el Banco)
+    for nombre, d in (("Ingresos", ing), ("Egresos", egr)):
+        if "Actividad" not in d.columns:
+            d["Actividad"] = fc.ACT_OPERATIVA
+        norm = d["Actividad"].map(fc.normalizar_actividad)
+        raros = int(norm.isna().sum())
+        if raros:
+            avisos.append(f"En '{nombre}' hay {raros} movimientos con una Actividad que no se reconoce "
+                          f"(se esperan: {', '.join(fc.ACTIVIDADES)}); se los trató como operativos.")
+        d["Actividad"] = norm.fillna(fc.ACT_OPERATIVA)
+        d["Cuenta"] = fc.normalizar_cuentas(d["Cuenta"]) if "Cuenta" in d.columns else fc.CUENTA_DEFECTO
+    saldos = compromisos = None
+    if "Saldos" in hojas:
+        saldos = hojas["Saldos"].copy()
+        saldos["Fecha"] = _serie_fecha(saldos["Fecha"])
+        saldos["Saldo"] = _serie_numerica(saldos["Saldo"])
+        saldos = saldos.dropna(subset=["Fecha", "Saldo"]).reset_index(drop=True)
+        saldos["Cuenta"] = fc.normalizar_cuentas(saldos["Cuenta"])
+        if saldos.empty:
+            saldos = None
+            avisos.append("La hoja Saldos no tiene filas válidas: no se calcula el flujo de caja.")
+    if "Compromisos" in hojas:
+        compromisos = hojas["Compromisos"].copy()
+        compromisos["Fecha_Vencimiento"] = _serie_fecha(compromisos["Fecha_Vencimiento"])
+        compromisos["Monto"] = _serie_numerica(compromisos["Monto"])
+        compromisos["Tipo"] = compromisos["Tipo"].map(fc.normalizar_tipo_compromiso)
+        n0 = len(compromisos)
+        compromisos = compromisos.dropna(subset=["Fecha_Vencimiento", "Monto", "Tipo"]).reset_index(drop=True)
+        if len(compromisos) < n0:
+            avisos.append(f"Se descartaron {n0 - len(compromisos)} filas de Compromisos con fecha, monto o Tipo (Cobro/Pago) inválidos.")
+        act = compromisos["Actividad"].map(fc.normalizar_actividad) if "Actividad" in compromisos.columns else pd.Series(fc.ACT_OPERATIVA, index=compromisos.index)
+        compromisos["Actividad"] = act.fillna(fc.ACT_OPERATIVA)
+        compromisos["Estado"] = (compromisos["Estado"].map(fc.normalizar_estado_compromiso)
+                                 if "Estado" in compromisos.columns else "Confirmado")
+        if "Cuenta" in compromisos.columns:
+            compromisos["Cuenta"] = fc.normalizar_cuentas(compromisos["Cuenta"])
+    if saldos is None and (ing["Actividad"] != fc.ACT_OPERATIVA).any():
+        avisos.append("Hay movimientos de inversión, financiación o transferencias, pero falta la hoja Saldos: "
+                      "no se puede armar el flujo de caja (el resultado del período sí se calcula).")
+    # Solo la actividad operativa forma parte del resultado; el resto va al flujo de caja
+    caja = {"ing": ing.copy(), "egr": egr.copy(), "saldos": saldos, "compromisos": compromisos, "avisos": avisos}
+    ing = ing[ing["Actividad"] == fc.ACT_OPERATIVA].copy()
+    egr = egr[egr["Actividad"] == fc.ACT_OPERATIVA].copy()
     if min(len(pagos), len(ing), len(egr)) == 0:
         raise ValueError("Alguna de las tablas de movimientos no tiene datos válidos (revisá fechas y montos).")
-    return {"socios": socios, "pagos": pagos, "ing": marcar_extraordinarios(ing), "egr": marcar_extraordinarios(egr)}
+    return {"socios": socios, "pagos": pagos, "ing": marcar_extraordinarios(ing), "egr": marcar_extraordinarios(egr), "caja": caja}
 
 
 def cargar_excel(fuente):
@@ -279,7 +330,8 @@ def _leer_csv(contenido):
 
 def _tabla_de_csv(nombre, df):
     n = _norm(os.path.splitext(os.path.basename(nombre))[0])
-    for clave, tabla in (("ingreso", "Ingresos"), ("egreso", "Egresos"), ("gasto", "Egresos"),
+    for clave, tabla in (("saldo", "Saldos"), ("compromiso", "Compromisos"), ("vencimiento", "Compromisos"),
+                         ("ingreso", "Ingresos"), ("egreso", "Egresos"), ("gasto", "Egresos"),
                          ("pago", "Pago_Cuota_Social"), ("cuota", "Pago_Cuota_Social"), ("socio", "Socios")):
         if clave in n:
             return tabla
@@ -289,7 +341,7 @@ def _tabla_de_csv(nombre, df):
     if {"ID_Socio", "Monto", "Fecha"} <= cols:
         return "Pago_Cuota_Social"
     raise ValueError(f"No pude identificar qué tabla es '{nombre}'. Nombrá el archivo con la palabra "
-                     f"'socios', 'pagos', 'ingresos' o 'egresos'.")
+                     f"'socios', 'pagos', 'ingresos' o 'egresos' (y, de forma opcional, 'saldos' o 'compromisos').")
 
 
 def cargar_archivos(items):
@@ -440,7 +492,7 @@ def _totales(datos, desde, hasta):
 def _metricas_mes(datos, per):
     socios = datos["socios"]
     ing, egr, pagos = datos["ing"], datos["egr"], datos["pagos"]
-    desde, hasta = per.start_time, per.end_time
+    desde, hasta = per.start_time, per.end_time.normalize()  # _filtrar ya incluye todo el último día
     i_m = int(_filtrar(ing, desde, hasta)["Monto"].sum())
     e_m = int(_filtrar(egr, desde, hasta)["Monto"].sum())
     pm = _filtrar(pagos, desde, hasta)
@@ -625,7 +677,7 @@ def _estado(v, ok, mal, mayor_mejor=True):
 
 
 def calcular_semaforo(k):
-    """Semáforo de hasta 13 indicadores con umbrales explícitos (verde = bien, amarillo = regular, rojo = mal).
+    """Semáforo de hasta 15 indicadores con umbrales explícitos (verde = bien, amarillo = regular, rojo = mal).
     Los indicadores que no se pueden calcular por falta de datos simplemente no se incluyen."""
     t, s, c, x, d = k["totales"], k["socios"], k["comparacion"], k["extraordinarios"], k["deudores"]
     pr, ej = k.get("proyeccion"), k.get("ejecucion")
@@ -668,6 +720,18 @@ def calcular_semaforo(k):
     if ej:
         add("Futuro", "Ejecución presupuestaria", signo_pct(ej["desvio_resultado_pct"]), _estado(ej["desvio_resultado_pct"], -0.05, -0.15),
             "Resultado real vs presupuesto previo: Verde ≥ -5% · Rojo < -15%")
+    cj = k.get("caja")
+    if cj:
+        cob_c = cj["periodo"].get("cobertura")
+        if cob_c is not None:
+            add("Caja", "Cobertura de caja", f"{cob_c:.1f}".replace(".", ",") + " meses", _estado(cob_c, fc.COBERTURA_VERDE, fc.COBERTURA_ROJO),
+                "Saldo final sobre el egreso mensual promedio (con cuotas de deuda): Verde ≥ 3 meses · Rojo < 1 mes")
+        pj = cj.get("proyeccion")
+        if pj:
+            h6 = next((x for x in pj["horizontes"] if x["meses"] == 6), pj["horizontes"][-1])
+            est = "rojo" if h6["saldo_minimo"] < 0 else ("amarillo" if h6["saldo_minimo_pesimista"] < 0 else "verde")
+            add("Caja", f"Saldo de caja proyectado ({h6['meses']} meses)", f"{ars_m(h6['saldo'])}  (mínimo {ars_m(h6['saldo_minimo'])})", est,
+                "Verde: nunca negativo, ni en el escenario pesimista · Rojo: saldo negativo en el escenario base")
 
     ev = it
     n = {e: sum(1 for i in it if i["estado"] == e) for e in ESTADOS}
@@ -677,12 +741,49 @@ def calcular_semaforo(k):
     return {"items": it, "conteo": n, "puntaje": score, "general": general, "evaluados": len(ev)}
 
 
+def _no_operativos(datos, desde, hasta):
+    """Movimientos de inversión, financiación y transferencias del rango: fuera del resultado, dentro del flujo de caja."""
+    out = {}
+    caja = datos.get("caja")
+    if not caja:
+        return out
+    for clave, df in (("ingresos", caja["ing"]), ("egresos", caja["egr"])):
+        d = _filtrar(df, desde, hasta)
+        for act, g in d[d["Actividad"] != fc.ACT_OPERATIVA].groupby("Actividad"):
+            o = out.setdefault(act, {"ingresos": 0, "egresos": 0, "n": 0})
+            o[clave] += int(g["Monto"].sum())
+            o["n"] += int(len(g))
+    return out
+
+
+def calcular_caja(k, datos, hasta):
+    """Flujo de caja histórico del período y proyectado. None si el archivo no trae la hoja Saldos."""
+    caja = datos.get("caja")
+    if not caja or caja.get("saldos") is None:
+        return None
+    h = fc.historico(caja["ing"], caja["egr"], datos["pagos"], caja["saldos"], hasta)
+    per = k["periodo"]
+    res = fc.resumen_periodo(h, per["desde"], per["hasta"]) if h else None
+    if not res:
+        return None
+    out = {"periodo": res, "avisos": list(caja["avisos"]) + h["avisos"], "cuentas": h["cuentas"], "proyeccion": None,
+           "hay_compromisos": caja.get("compromisos") is not None}
+    pr = k.get("proyeccion")
+    if pr:
+        ult = pd.Period(pr["serie"][0]["mes"]) - 1
+        previas = [f for f in h["filas"] if pd.Period(f["mes"]) <= ult]
+        saldo0 = previas[-1]["saldo_final"] if previas else h["filas"][0]["saldo_inicial"]
+        out["proyeccion"] = fc.proyectar(saldo0, ult, pr["serie"], [x["meses"] for x in pr["horizontes"]], caja.get("compromisos"))
+    return out
+
+
 def _completar_planificacion(k, datos, hasta, desde_periodo, extra, metodo, meses_presupuesto):
     pl_ = calcular_planificacion(datos, hasta, desde_periodo, extra, metodo, meses_presupuesto)
     k["proyeccion"], k["presupuesto"], k["ejecucion"] = pl_["proyeccion"], pl_["presupuesto"], pl_["ejecucion"]
     k["nota_mes_incompleto"] = pl_["nota_mes_incompleto"]
     pg = datos["pagos"]
     k["deudores"]["cobrado_historico"] = int(pg[pg["Fecha"] <= pd.Timestamp(hasta) + pd.Timedelta(days=1)]["Monto"].sum())
+    k["caja"] = calcular_caja(k, datos, hasta)
     k["semaforo"] = calcular_semaforo(k)
     return k
 
@@ -768,6 +869,8 @@ def calcular_kpis(datos, tipo, clave, proyeccion_extra=None, metodo="tendencia",
             "pagos_previos_al_alta": int((chk["Fecha"] < chk["Fecha_Alta"]).sum()),
             "morosos_con_pagos": int(pagos[pagos["ID_Socio"].isin(ids_morosos)]["ID_Socio"].nunique()),
             "cuota_no_esta_en_ingresos": "Cuota social" not in set(ing["Categoria"].astype(str)),
+            "no_operativos": _no_operativos(datos, desde, hasta),
+            "avisos_carga": list((datos.get("caja") or {}).get("avisos", [])),
         },
     }
     if len(meses) == 1:  # informe mensual: detalle de movimientos
@@ -913,7 +1016,67 @@ def analisis_local(k):
         else:
             pres_t += "No hay historial previo suficiente para medir la ejecución de este presupuesto en el período."
 
+    # ---- flujo de caja (solo si el archivo trae la hoja Saldos)
+    cj = k.get("caja")
+    caja_t = caja_proy_t = ""
+    pj = cj.get("proyeccion") if cj else None
+    if cj:
+        rp = cj["periodo"]
+        caja_t = (f"Medido por caja, el saldo del club {per['frase']} pasó de {ars_m(rp['saldo_inicial'])} a {ars_m(rp['saldo_final'])}, "
+                  f"una variación neta de {ars_m(rp['neto'])}. ")
+        comp = [f"la actividad operativa {'aportó' if rp['operativo'] >= 0 else 'consumió'} {ars_m(abs(rp['operativo']))}"]
+        if abs(rp["inversion"]) >= 1:
+            comp.append(f"las inversiones {'aportaron' if rp['inversion'] >= 0 else 'demandaron'} {ars_m(abs(rp['inversion']))}")
+        if abs(rp["financiacion"]) >= 1:
+            comp.append(f"la financiación {'aportó' if rp['financiacion'] >= 0 else 'demandó'} {ars_m(abs(rp['financiacion']))} netos de cuotas")
+        caja_t += "En ese lapso " + _lista_y(comp) + ". "
+        if abs(rp["inversion"]) >= 1 or abs(rp["financiacion"]) >= 1:
+            caja_t += (f"Por eso el flujo de caja ({ars_m(rp['neto'])}) difiere del resultado del período ({ars_m(t['resultado'])}): "
+                       "las inversiones y la financiación mueven la caja, pero no forman parte del resultado. ")
+        if rp["meses"] > 1:
+            caja_t += f"El saldo más bajo del período fue de {ars_m(rp['minimo']['saldo'])} al cierre de {rp['minimo']['mes']}. "
+        if len(rp["cuentas_final"]) > 1:
+            caja_t += "Al cierre, el dinero se reparte en " + _lista_y([f"{c_} ({ars_m(v_)})" for c_, v_ in rp["cuentas_final"].items()]) + ". "
+        if rp.get("cobertura") is not None:
+            caja_t += (f"Con ese saldo, la caja cubre {rp['cobertura']:.1f}".replace(".", ",") +
+                       f" meses de egresos operativos y cuotas de deuda (promedio mensual de los últimos {fc.MESES_REFERENCIA} meses: {ars_m(rp['egreso_referencia'])}). ")
+        if rp.get("anterior"):
+            va = rp["anterior"]
+            caja_t += (f"Respecto del período anterior, el saldo final {'subió' if rp['saldo_final'] >= va['saldo_final'] else 'bajó'} "
+                       f"de {ars_m(va['saldo_final'])} a {ars_m(rp['saldo_final'])}.")
+    if pj:
+        hz_ = pj["horizontes"]
+        partes = [f"{ars_m(h_['saldo'])} a {h_['meses']} meses (hasta {h_['hasta']})" for h_ in hz_[:3]]
+        caja_proy_t = (f"Partiendo de un saldo de {ars_m(pj['saldo_inicial'])} al cierre de {pj['ultimo_mes_historial']} y sumando a la proyección "
+                       f"ordinaria los compromisos conocidos, el escenario base estima un saldo de {_lista_y(partes)}. ")
+        if pj["compromisos"]:
+            grandes = sorted(pj["compromisos"], key=lambda r_: -r_["monto"])[:3]
+            det = _lista_y([f"{r_['concepto'].lower()} ({r_['fecha']}, {ars_m(r_['monto'])})" for r_ in grandes])
+            caja_proy_t += (f"Se consideraron {len(pj['compromisos'])} compromisos ({pj['n_confirmados']} confirmados y {pj['n_probables']} probables); "
+                            f"los de mayor monto son {det}. ")
+        else:
+            caja_proy_t += "No hay compromisos cargados para este horizonte, por lo que la caja se proyecta solo con la operatoria ordinaria. "
+        hx = next((h_ for h_ in hz_ if h_["meses"] == 6), hz_[-1])
+        caja_proy_t += f"El saldo más bajo estimado dentro de {hx['meses']} meses es de {ars_m(hx['saldo_minimo'])} ({hx['mes_minimo']}). "
+        if hx["saldo_minimo_pesimista"] >= 0:
+            caja_proy_t += "En el escenario pesimista el saldo se mantiene positivo en todo ese lapso. "
+        else:
+            caja_proy_t += f"En el escenario pesimista el saldo quedaría en negativo desde {hx['primer_mes_negativo_pesimista']}. "
+        if pr and pr.get("extra"):
+            hxe = next((h_ for h_ in hz_ if h_["meses"] == pr["extra"]), None)
+            if hxe:
+                caja_proy_t += f"Para el horizonte elegido de {hxe['meses']} meses se estima un saldo de {ars_m(hxe['saldo'])}. "
+        caja_proy_t += "Los vencimientos de deuda, inversiones y otros pagos se toman de la hoja Compromisos; los ingresos y egresos habituales se proyectan por tendencia."
+
     alertas, temas = [], []
+    if cj and cj["periodo"].get("cobertura") is not None and cj["periodo"]["cobertura"] < 2:
+        alertas.append(f"La caja cubre solo {cj['periodo']['cobertura']:.1f}".replace(".", ",") + " meses de egresos operativos y cuotas de deuda.")
+        temas.append("el nivel de caja")
+    if pj:
+        hx_ = next((h_ for h_ in pj["horizontes"] if h_["meses"] == 6), pj["horizontes"][-1])
+        if hx_["saldo_minimo_pesimista"] < 0:
+            alertas.append(f"En el escenario pesimista la caja quedaría en negativo desde {hx_['primer_mes_negativo_pesimista']}.")
+            temas.append("la proyección de caja")
     if pr and pr["horizontes"][0]["res_pesimista"] < 0:
         alertas.append(f"En el escenario pesimista, el resultado proyectado a 3 meses sería negativo ({ars_m(pr['horizontes'][0]['res_pesimista'])}).")
         temas.append("el escenario pesimista de la proyección")
@@ -962,6 +1125,13 @@ def analisis_local(k):
                     f"que concentran el {pct(d['participacion_top'])} de la deuda estimada.")
     if x["cantidad"] and abs(x["peso_en_resultado"]) >= 0.10:
         reco.append("Presupuestar sin contar los ingresos extraordinarios y destinarlos a reservas o inversiones puntuales.")
+    if cj and cj["periodo"].get("cobertura") is not None and cj["periodo"]["cobertura"] < fc.COBERTURA_VERDE:
+        reco.append(f"Reconstituir un fondo de caja equivalente a, al menos, {fc.COBERTURA_VERDE:.0f} meses de egresos (hoy cubre {cj['periodo']['cobertura']:.1f}".replace(".", ",") + ").")
+    if pj:
+        comp_pagos = [r_ for r_ in pj["compromisos"] if r_["tipo"] == "Pago" and r_["actividad"] in (fc.ACT_INVERSION, fc.ACT_FINANCIACION)]
+        if comp_pagos:
+            reco.append(f"Programar los pagos comprometidos de inversión y deuda ({ars_m(sum(r_['monto'] for r_ in comp_pagos))} en los próximos "
+                        f"{len(pj['serie'])} meses) contra el saldo de caja proyectado, para no tensionar la liquidez.")
     reco.append("Destinar parte del superávit a un fondo de reserva y a inversión en infraestructura e inferiores."
                 if sup else "Definir un plan de reducción de gastos y refuerzo de ingresos para revertir el déficit.")
     if pp:
@@ -969,6 +1139,7 @@ def analisis_local(k):
     reco.append("Repetir este reporte periódicamente para monitorear la evolución de los indicadores.")
     return {"introduccion": intro, "ingresos": ing, "egresos": egr, "resultado": res, "socios": soc,
             "deudores": deu, "extraordinarios": extra, "semaforo": sem, "proyeccion": proy_t, "presupuesto": pres_t,
+            "caja": caja_t, "caja_proyeccion": caja_proy_t,
             "alertas": alertas, "cierre": cierre, "recomendaciones": reco[:6]}
 
 
@@ -1096,8 +1267,84 @@ def grafico_proyeccion(proy, ruta, max_meses=None):
     return 7.1 / 3.0
 
 
+def grafico_caja(k, ruta):
+    """Flujo de caja mensual por actividad (barras apiladas) y saldo de cierre (línea)."""
+    f = k["caja"]["periodo"]["filas"]
+    x = list(range(len(f)))
+    fig, ax = plt.subplots(figsize=(7.1, 3.0), dpi=200)
+    pos, neg = [0.0] * len(f), [0.0] * len(f)
+    for clave, nombre, color in (("operativo", "Operativa", HEX_ING), ("inversion", "Inversión", HEX_EGR), ("financiacion", "Financiación", HEX_CUOTA)):
+        for i in x:
+            v = f[i][clave] / 1e6
+            if abs(v) < 1e-9:
+                continue
+            base = pos[i] if v >= 0 else neg[i]
+            ax.bar(i, v, 0.58, bottom=base, color=color, alpha=1.0 if f[i]["en_periodo"] else 0.35)
+            if v >= 0:
+                pos[i] += v
+            else:
+                neg[i] += v
+    saldo = [v["saldo_final"] / 1e6 for v in f]
+    ax.plot(x, saldo, color=HEX_NEGRO, marker="o", markersize=4.5, linewidth=2, label="Saldo de cierre", zorder=5)
+    if len(f) <= 12:
+        for i in x:
+            ax.annotate(f"{saldo[i]:,.0f}".replace(",", "."), (i, saldo[i]), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=6.5, color="#111111")
+    ax.axhline(0, color="#888888", linewidth=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels([v["etiqueta"] for v in f], fontsize=7 if len(f) > 9 else 7.5)
+    ax.set_ylabel("Millones de $", fontsize=8, color="#444444")
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(lo, hi + (hi - lo) * 0.16)
+    _estilo_ejes(ax)
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    manijas = [Line2D([0], [0], color=HEX_NEGRO, marker="o", markersize=4.5, linewidth=2, label="Saldo de cierre"),
+               Patch(color=HEX_ING, label="Operativa"), Patch(color=HEX_EGR, label="Inversión"), Patch(color=HEX_CUOTA, label="Financiación")]
+    ax.legend(handles=manijas, loc="upper left", ncol=4, fontsize=7.5, frameon=False)
+    fig.tight_layout()
+    fig.savefig(ruta)
+    plt.close(fig)
+    return 7.1 / 3.0
+
+
+def grafico_caja_proyectada(k, ruta):
+    """Saldo de caja: historial (línea llena) + proyección base (punteada) con banda pesimista-optimista."""
+    hist = k["caja"]["periodo"]["filas"][-6:]
+    serie = k["caja"]["proyeccion"]["serie"]
+    nh, n = len(hist), len(hist) + len(serie)
+    xh, xp = list(range(nh)), list(range(nh, n))
+    fig, ax = plt.subplots(figsize=(7.1, 3.0), dpi=200)
+    ax.plot(xh, [v["saldo_final"] / 1e6 for v in hist], color=HEX_NEGRO, linewidth=2, marker="o", markersize=3.5, label="Saldo histórico")
+    base = [v["saldo"] / 1e6 for v in serie]
+    ax.plot([nh - 1] + xp, [hist[-1]["saldo_final"] / 1e6] + base, color=HEX_ING, linewidth=1.9, linestyle="--", marker="o", markersize=2.5,
+            label="Saldo proyectado (base)")
+    ax.fill_between(xp, [v["saldo_pesimista"] / 1e6 for v in serie], [v["saldo_optimista"] / 1e6 for v in serie],
+                    color=HEX_ING, alpha=0.14, linewidth=0, label="Banda pesimista – optimista")
+    ax.axhline(0, color="#888888", linewidth=0.8)
+    ax.axvline(nh - 0.5, color="#888888", linewidth=0.8, linestyle=":")
+    imin = min(range(len(serie)), key=lambda i: serie[i]["saldo"])
+    ax.annotate(f"mín. {base[imin]:,.0f}".replace(",", "."), (xp[imin], base[imin]), textcoords="offset points", xytext=(0, -13), ha="center", fontsize=7, color="#444444")
+    ax.annotate(f"{base[-1]:,.0f}".replace(",", "."), (xp[-1], base[-1]), textcoords="offset points", xytext=(0, 7), ha="center", fontsize=7, color=HEX_ING)
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(min(lo, 0), hi + (hi - lo) * 0.15)
+    ymax = ax.get_ylim()[1]
+    ax.text(nh - 0.35, ymax * 0.99, "Proyección", fontsize=7.5, color="#555555", va="top")
+    ax.text(nh - 0.65, ymax * 0.99, "Historial", fontsize=7.5, color="#555555", va="top", ha="right")
+    paso = max(1, -(-n // 14))
+    etiq = [v["etiqueta"] for v in hist] + [v["etiqueta"] for v in serie]
+    ax.set_xticks(range(0, n, paso))
+    ax.set_xticklabels([etiq[i] for i in range(0, n, paso)], fontsize=7, rotation=45 if n > 12 else 0, ha="right" if n > 12 else "center")
+    ax.set_ylabel("Millones de $", fontsize=8, color="#444444")
+    _estilo_ejes(ax)
+    ax.legend(loc="upper left", bbox_to_anchor=(0, 0.93), fontsize=7.5, frameon=False)
+    fig.tight_layout()
+    fig.savefig(ruta)
+    plt.close(fig)
+    return 7.1 / 3.0
+
+
 def generar_graficos(k, carpeta):
-    """Genera los 3 gráficos como PNG y devuelve {nombre: (ruta, relación_aspecto)}."""
+    """Genera los gráficos como PNG y devuelve {nombre: (ruta, relación_aspecto)}."""
     os.makedirs(carpeta, exist_ok=True)
     out = {}
     for nombre, fn in (("evolucion", grafico_evolucion), ("composicion", grafico_composicion), ("socios", grafico_socios)):
@@ -1106,6 +1353,12 @@ def generar_graficos(k, carpeta):
     if k.get("proyeccion"):
         ruta = os.path.join(carpeta, "proyeccion.png")
         out["proyeccion"] = (ruta, grafico_proyeccion(k["proyeccion"], ruta))
+    if k.get("caja"):
+        ruta = os.path.join(carpeta, "caja.png")
+        out["caja"] = (ruta, grafico_caja(k, ruta))
+        if k["caja"].get("proyeccion"):
+            ruta = os.path.join(carpeta, "caja_proyeccion.png")
+            out["caja_proyeccion"] = (ruta, grafico_caja_proyectada(k, ruta))
     return out
 
 
@@ -1118,7 +1371,8 @@ def buscar_logo(carpeta):
     return None
 
 
-def construir_pdf(k, a, salida, logo=None, graficos=None):
+def construir_pdf(k, a, salida, logo=None, graficos=None, detalle="completo"):
+    resumido = detalle == "resumido"
     W, H = A4
     mg = 1.8 * cm
     ancho = W - 2 * mg
@@ -1146,6 +1400,8 @@ def construir_pdf(k, a, salida, logo=None, graficos=None):
         return [Paragraph(escape(x), estilo, bulletText="\u2022") for x in items]
 
     tipo_txt = {"mensual": "Informe mensual", "trimestral": "Informe trimestral", "anual": "Informe anual"}[k["periodo"]["tipo"]]
+    if resumido:
+        tipo_txt += " (resumen)"
 
     def pegar_escudo(c, x, y, lado):
         """Dibuja el escudo sobre un fondo blanco para que se vea bien en el encabezado negro."""
@@ -1448,6 +1704,104 @@ def construir_pdf(k, a, salida, logo=None, graficos=None):
         tb.setStyle(TableStyle(est))
         return tb
 
+    # ---------- flujo de caja
+    cj = k.get("caja")
+    pj = cj.get("proyeccion") if cj else None
+
+    def col_signo(v):
+        return GRIS if abs(v) < 1 else (VERDE if v > 0 else ROJO)
+
+    def estilo_base(tam=8, rel=True):
+        est = [("FONT", (0, 0), (-1, -1), "Helvetica", tam), ("BACKGROUND", (0, 0), (-1, 0), NEGRO), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+               ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", tam), ("ALIGN", (1, 0), (-1, -1), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("TOPPADDING", (0, 0), (-1, -1), 3.2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.2)]
+        if rel:
+            est.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, GRIS_CLARO]))
+        return est
+
+    def tira_caja():
+        rp = cj["periodo"]
+        cob = rp.get("cobertura")
+        t_ = Table([[mini("Saldo inicial", ars_m(rp["saldo_inicial"]), "al inicio del período"),
+                     mini("Variación neta", ars_m(rp["neto"]), "operativo + inversión + financiación"),
+                     mini("Saldo final", ars_m(rp["saldo_final"]), f"mínimo {ars_m(rp['minimo']['saldo'])}" if rp["meses"] > 1 else "al cierre del mes"),
+                     mini("Cobertura de caja", (f"{cob:.1f}".replace(".", ",") + " meses") if cob is not None else "n/c",
+                          "de egresos y cuotas de deuda")]], colWidths=[ancho / 4] * 4)
+        t_.setStyle(TableStyle([("LINEABOVE", (0, 0), (-1, 0), 2.5, NEGRO), ("BACKGROUND", (0, 0), (-1, -1), GRIS_CLARO),
+                                ("LINEAFTER", (0, 0), (-2, -1), 3, colors.white), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
+        return t_
+
+    def tabla_caja():
+        rp = cj["periodo"]
+        filas = [["Mes", "Saldo inicial", "Operativo", "Inversión", "Financiación", "Variación", "Saldo final"]]
+        for f in rp["filas"]:
+            filas.append([_cap(f["nombre"]), ars_m(f["saldo_inicial"]), ars_m(f["operativo"]), ars_m(f["inversion"]),
+                          ars_m(f["financiacion"]), ars_m(f["neto"]), ars_m(f["saldo_final"])])
+        total = rp["meses"] > 1
+        if total:
+            filas.append(["Total del período", ars_m(rp["saldo_inicial"]), ars_m(rp["operativo"]), ars_m(rp["inversion"]),
+                          ars_m(rp["financiacion"]), ars_m(rp["neto"]), ars_m(rp["saldo_final"])])
+        tb = Table(filas, colWidths=[ancho * w for w in (0.19, 0.14, 0.13, 0.13, 0.14, 0.13, 0.14)], repeatRows=1)
+        est = estilo_base(8)
+        for i, f in enumerate(rp["filas"], start=1):
+            if not f["en_periodo"]:
+                est.append(("TEXTCOLOR", (0, i), (-1, i), GRIS_MEDIO))
+                continue
+            for col, clave in ((2, "operativo"), (3, "inversion"), (4, "financiacion"), (5, "neto")):
+                est.append(("TEXTCOLOR", (col, i), (col, i), col_signo(f[clave])))
+            est.append(("FONT", (6, i), (6, i), "Helvetica-Bold", 8))
+        if total:
+            n_ = len(filas) - 1
+            est.extend([("FONT", (0, n_), (-1, n_), "Helvetica-Bold", 8), ("LINEABOVE", (0, n_), (-1, n_), 1, NEGRO)])
+            for col, clave in ((2, "operativo"), (3, "inversion"), (4, "financiacion"), (5, "neto")):
+                est.append(("TEXTCOLOR", (col, n_), (col, n_), col_signo(rp[clave])))
+        tb.setStyle(TableStyle(est))
+        return tb
+
+    def tabla_caja_horizontes():
+        filas = [["Horizonte", "Hasta", "Flujo neto", "Saldo (base)", "Pesimista – optimista", "Saldo mínimo"]]
+        for h_ in pj["horizontes"]:
+            filas.append([f"{h_['meses']} meses", h_["hasta"].capitalize(), ars_m(h_["flujo_neto"]), ars_m(h_["saldo"]),
+                          rango_m(h_["saldo_pesimista"], h_["saldo_optimista"]), ars_m(h_["saldo_minimo"])])
+        tb = Table(filas, colWidths=[ancho * w for w in (0.11, 0.17, 0.15, 0.16, 0.27, 0.14)], repeatRows=1)
+        est = estilo_base(8)
+        for i, h_ in enumerate(pj["horizontes"], start=1):
+            est.append(("TEXTCOLOR", (2, i), (2, i), col_signo(h_["flujo_neto"])))
+            est.append(("TEXTCOLOR", (5, i), (5, i), VERDE if h_["saldo_minimo"] >= 0 else ROJO))
+            if k["proyeccion"] and k["proyeccion"].get("extra") == h_["meses"]:
+                est.append(("FONT", (0, i), (-1, i), "Helvetica-Bold", 8))
+        tb.setStyle(TableStyle(est))
+        return tb
+
+    def tabla_caja_meses():
+        sj = pj["serie"][:6]
+        filas = [["Mes", "Operativo", "Inversión", "Financiación", "Variación", "Saldo (base)"]]
+        for f in sj:
+            filas.append([_cap(f["nombre"]), ars_m(f["operativo"]), ars_m(f["inversion"]), ars_m(f["financiacion"]), ars_m(f["neto"]), ars_m(f["saldo"])])
+        tb = Table(filas, colWidths=[ancho * w for w in (0.22, 0.15, 0.15, 0.16, 0.15, 0.17)], repeatRows=1)
+        est = estilo_base(8)
+        for i, f in enumerate(sj, start=1):
+            for col, clave in ((1, "operativo"), (2, "inversion"), (3, "financiacion"), (4, "neto")):
+                est.append(("TEXTCOLOR", (col, i), (col, i), col_signo(f[clave])))
+            est.append(("FONT", (5, i), (5, i), "Helvetica-Bold", 8))
+        tb.setStyle(TableStyle(est))
+        return tb
+
+    def tabla_compromisos():
+        lista = pj["compromisos"][:14]
+        filas = [["Fecha", "Tipo", "Concepto", "Actividad", "Estado", "Monto"]]
+        for r in lista:
+            filas.append([r["fecha"], r["tipo"], Paragraph(escape(r["concepto"]), celda), r["actividad"], r["estado"], ars_m(r["monto"])])
+        tb = Table(filas, colWidths=[ancho * w for w in (0.12, 0.08, 0.37, 0.15, 0.12, 0.16)], repeatRows=1)
+        est = estilo_base(8)
+        est.append(("ALIGN", (1, 0), (4, -1), "LEFT"))
+        for i, r in enumerate(lista, start=1):
+            est.append(("TEXTCOLOR", (1, i), (1, i), VERDE if r["tipo"] == "Cobro" else ROJO))
+        tb.setStyle(TableStyle(est))
+        extra_n = len(pj["compromisos"]) - len(lista)
+        return [tb] + ([Spacer(1, 2), Paragraph(f"Y {extra_n} compromisos más dentro del horizonte.", peq)] if extra_n > 0 else [])
+
     q = k["calidad_datos"]
     notas = []
     if k["periodo"]["parcial"]:
@@ -1470,6 +1824,25 @@ def construir_pdf(k, a, salida, logo=None, graficos=None):
         notas.append(f"Presupuesto: tendencia por rubro (tope +15%/-20% sobre el promedio reciente), con ingresos {pct(pp['criterio']['prudencia_ingresos'], 0)} "
                      f"menores, egresos {pct(pp['criterio']['prudencia_egresos'], 0)} mayores y reserva de {pct(pp['criterio']['reserva'], 0)} de los egresos. "
                      "Es una propuesta elaborada a partir de los datos, no un presupuesto aprobado.")
+    if q.get("no_operativos"):
+        det = "; ".join(f"{a_.lower()}: {v_['n']} movimientos" + (f" (ingresos {ars_m(v_['ingresos'])}, egresos {ars_m(v_['egresos'])})" if a_ != fc.ACT_TRANSFERENCIA else "")
+                        for a_, v_ in q["no_operativos"].items())
+        notas.append("El resultado del período incluye solo la actividad operativa. Quedaron fuera del resultado, y se informan solo en el flujo de caja: "
+                     f"{det}.")
+    if cj:
+        notas.append("Flujo de caja (método directo): la fecha de cada movimiento se toma como la fecha efectiva en que se movió el dinero. El saldo parte de la "
+                     "hoja Saldos y suma, mes a mes, la actividad operativa, las inversiones y la financiación; las transferencias entre cuentas del club no "
+                     "son ingresos ni gastos. Las cuotas sociales se consideran cobradas en la cuenta Banco. La cobertura de caja es el saldo final sobre el "
+                     f"egreso mensual promedio de los últimos {fc.MESES_REFERENCIA} meses (operativo más cuotas de deuda).")
+    if pj:
+        nota_c = ("Flujo de caja proyectado: parte del saldo al cierre del último mes histórico y suma a la proyección ordinaria de ingresos y egresos "
+                  "(sin extraordinarios) los compromisos de la hoja Compromisos. Escenario base: todos los compromisos; pesimista: piso de ingresos, techo de "
+                  "egresos y sin los cobros probables; optimista: lo contrario.")
+        if pj["ignorados_vencidos"]:
+            nota_c += f" {pj['ignorados_vencidos']} compromisos con fecha anterior al inicio de la proyección no se tuvieron en cuenta."
+        if not pj["compromisos"]:
+            nota_c += " No hay compromisos cargados dentro del horizonte."
+        notas.append(nota_c)
     if k.get("nota_mes_incompleto"):
         notas.append(k["nota_mes_incompleto"])
     notas.append("Semáforo: los umbrales de cada indicador figuran en la tabla y son criterios de gestión orientativos, ajustables al criterio de la comisión directiva.")
@@ -1479,39 +1852,82 @@ def construir_pdf(k, a, salida, logo=None, graficos=None):
         notas.append("En los gráficos, los meses más claros son contexto previo al período del informe.")
     notas.append("Análisis redactado con reglas automáticas a partir de los indicadores calculados.")
 
-    # ---- armado: 1. Introducción | 2. Desarrollo | 3. Cierre
+    # ---- armado: 1. Introducción | 2. Desarrollo | 3. Cierre (las secciones del desarrollo se numeran solas)
+    contador = iter(range(1, 100))
+
+    def num(titulo):
+        return f"2.{next(contador)} {titulo}"
+
     story = [NextPageTemplate("resto"), Spacer(1, 0.2 * cm), kpis]
     story += seccion("1. Introducción") + [Paragraph(escape(a["introduccion"]), cuerpo)]
 
+    if resumido:
+        # Versión resumida: cifras clave, evolución, caja, semáforo, puntos de atención, proyección y cierre.
+        story += seccion("2. Lo más importante")
+        story += [KeepTogether([subtitulo("Resultado y evolución"), Paragraph(escape(a["resultado"]), cuerpo), Spacer(1, 4), img("evolucion")]), Spacer(1, 6)]
+        if cj:
+            story += [KeepTogether([subtitulo("Flujo de caja"), Paragraph(escape(a["caja"]), cuerpo), Spacer(1, 4), tira_caja()]), Spacer(1, 6)]
+        story.append(KeepTogether([subtitulo("Puntos de atención")] + bullets(a["alertas"][:5])))
+        story += [Spacer(1, 6), KeepTogether([subtitulo("Semáforo de indicadores"), Paragraph(escape(a["semaforo"]), cuerpo), Spacer(1, 5)] + tabla_semaforo()), Spacer(1, 6)]
+        if pr:
+            story += [KeepTogether([subtitulo("Proyección a 3, 6 y 12 meses"), tabla_proyeccion()]), Spacer(1, 6)]
+        if pj:
+            story += [KeepTogether([subtitulo("Flujo de caja proyectado"), Paragraph(escape(a["caja_proyeccion"]), cuerpo), Spacer(1, 4),
+                                    Paragraph("<b>Saldo de caja proyectado por horizonte</b>", peq), Spacer(1, 2), tabla_caja_horizontes()]), Spacer(1, 6)]
+        notas_res = [n_ for n_ in (["Período parcial: se informan solo los meses con datos disponibles."] if k["periodo"]["parcial"] else [])]
+        if k.get("nota_mes_incompleto"):
+            notas_res.append(k["nota_mes_incompleto"])
+        notas_res += ["Versión resumida del informe: el detalle de ingresos y egresos por rubro, movimientos extraordinarios, deudores, presupuesto y "
+                      "tablas mensuales está en el informe completo.",
+                      "Semáforo: los umbrales de cada indicador figuran en la tabla y son criterios de gestión orientativos.",
+                      "Proyecciones y flujo de caja proyectado son estimaciones a partir de los datos, no garantías de resultados.",
+                      "Análisis redactado con reglas automáticas a partir de los indicadores calculados."]
+        story.append(KeepTogether(seccion("3. Cierre") + [Paragraph(escape(a["cierre"]), cuerpo)]
+                                  + [subtitulo("Recomendaciones")] + bullets(a["recomendaciones"])
+                                  + [Spacer(1, 8), Paragraph("<b>Notas</b>", peq)] + bullets(notas_res, nota)))
+        doc.build(story)
+        return salida
+
     story += seccion("2. Desarrollo")
-    story += [bloque("2.1 Ingresos", a["ingresos"]), bloque("2.2 Egresos", a["egresos"]), Spacer(1, 4), img("composicion")]
-    story += [KeepTogether([subtitulo("2.3 Resultado y evolución"), Paragraph(escape(a["resultado"]), cuerpo), Spacer(1, 4), img("evolucion")]), Spacer(1, 6)]
+    story += [bloque(num("Ingresos"), a["ingresos"]), bloque(num("Egresos"), a["egresos"]), Spacer(1, 4), img("composicion")]
+    story += [KeepTogether([subtitulo(num("Resultado y evolución")), Paragraph(escape(a["resultado"]), cuerpo), Spacer(1, 4), img("evolucion")]), Spacer(1, 6)]
     if "movimientos" in k:
         story += [tabla_movimientos("Ingresos del mes", k["movimientos"]["ingresos"], t["ingresos"]), Spacer(1, 6),
                   tabla_movimientos("Egresos del mes", k["movimientos"]["egresos"], t["egresos"])]
     else:
         story += [tabla_mensual()]
-    story += [KeepTogether([subtitulo("2.4 Movimientos extraordinarios"), Paragraph(escape(a["extraordinarios"]), cuerpo)]
+    if cj:
+        story += [Spacer(1, 6), KeepTogether([subtitulo(num("Flujo de caja")), Paragraph(escape(a["caja"]), cuerpo), Spacer(1, 4), tira_caja()]),
+                  Spacer(1, 6), img("caja"), Spacer(1, 6),
+                  KeepTogether([Paragraph("<b>Flujo de caja por mes</b>", peq), Spacer(1, 2), tabla_caja()]), Spacer(1, 6)]
+    story += [KeepTogether([subtitulo(num("Movimientos extraordinarios")), Paragraph(escape(a["extraordinarios"]), cuerpo)]
                            + ([Spacer(1, 4)] + tabla_extraordinarios() if x["cantidad"] else [])), Spacer(1, 4)]
-    story += [bloque("2.5 Socios y cuota social", a["socios"]), Spacer(1, 4), socios_t, Spacer(1, 6), img("socios")]
-    story += [KeepTogether([subtitulo(f"2.6 Los {len(d['top'])} mayores deudores"), Paragraph(escape(a["deudores"]), cuerpo), Spacer(1, 4)] + tabla_deudores())]
+    story += [bloque(num("Socios y cuota social"), a["socios"]), Spacer(1, 4), socios_t, Spacer(1, 6), img("socios")]
+    story += [KeepTogether([subtitulo(num(f"Los {len(d['top'])} mayores deudores")), Paragraph(escape(a["deudores"]), cuerpo), Spacer(1, 4)] + tabla_deudores())]
     if pp:
-        story += [KeepTogether([subtitulo(f"2.7 Presupuesto propuesto a {pp['meses']} meses"), Paragraph(escape(a["presupuesto"]), cuerpo), Spacer(1, 4)]), tabla_presupuesto()]
+        story += [KeepTogether([subtitulo(num(f"Presupuesto propuesto a {pp['meses']} meses")), Paragraph(escape(a["presupuesto"]), cuerpo), Spacer(1, 4)]), tabla_presupuesto()]
         if pp.get("trimestres"):
             story += [Spacer(1, 6), KeepTogether([Paragraph("<b>Presupuesto por trimestre</b>", peq), Spacer(1, 2), tabla_trimestres()])]
         if ej:
             story += [Spacer(1, 6), KeepTogether([Paragraph("<b>Ejecución: presupuesto armado con datos previos vs. real del período</b>", peq), Spacer(1, 2), tabla_ejecucion()])]
         story.append(Spacer(1, 6))
     else:
-        story += [bloque("2.7 Presupuesto", a["presupuesto"])]
-    story.append(KeepTogether([subtitulo("2.8 Puntos de atención")] + bullets(a["alertas"])))
-    story += [Spacer(1, 6), KeepTogether([subtitulo("2.9 Semáforo de indicadores"), Paragraph(escape(a["semaforo"]), cuerpo), Spacer(1, 5)] + tabla_semaforo()), Spacer(1, 6)]
+        story += [bloque(num("Presupuesto"), a["presupuesto"])]
+    story.append(KeepTogether([subtitulo(num("Puntos de atención"))] + bullets(a["alertas"])))
+    story += [Spacer(1, 6), KeepTogether([subtitulo(num("Semáforo de indicadores")), Paragraph(escape(a["semaforo"]), cuerpo), Spacer(1, 5)] + tabla_semaforo()), Spacer(1, 6)]
     if pr:
-        sub_p = "2.10 Proyección a 3, 6 y 12 meses" + (f" (y a {pr['extra']} meses)" if pr.get("extra") else "")
+        sub_p = num("Proyección a 3, 6 y 12 meses") + (f" (y a {pr['extra']} meses)" if pr.get("extra") else "")
         story += [KeepTogether([subtitulo(sub_p), Paragraph(escape(a["proyeccion"]), cuerpo), Spacer(1, 4), img("proyeccion")]),
                   Spacer(1, 4), KeepTogether([tabla_proyeccion()]), Spacer(1, 6)]
     else:
-        story += [bloque("2.10 Proyección", a["proyeccion"])]
+        story += [bloque(num("Proyección"), a["proyeccion"])]
+    if pj:
+        story += [Spacer(1, 4), KeepTogether([subtitulo("Flujo de caja proyectado"), Paragraph(escape(a["caja_proyeccion"]), cuerpo)]),
+                  Spacer(1, 4), img("caja_proyeccion"), Spacer(1, 4), KeepTogether([Paragraph("<b>Saldo de caja proyectado por horizonte</b>", peq), Spacer(1, 2), tabla_caja_horizontes()]),
+                  Spacer(1, 6), KeepTogether([Paragraph("<b>Detalle de los primeros meses</b>", peq), Spacer(1, 2), tabla_caja_meses()])]
+        if pj["compromisos"]:
+            story += [Spacer(1, 6), KeepTogether([Paragraph("<b>Compromisos considerados en la proyección</b>", peq), Spacer(1, 2)] + tabla_compromisos())]
+        story.append(Spacer(1, 6))
 
     # El cierre completo (cierre + recomendaciones + notas) va en un solo bloque: si no entra en lo que queda de la página,
     # pasa entero a la siguiente, así nunca queda cortado.
@@ -1570,6 +1986,7 @@ def main():
     ap.add_argument("--proyeccion", type=int, default=0, metavar="MESES", help="horizonte adicional de proyección, de 1 a 36 meses (además de 3/6/12)")
     ap.add_argument("--metodo", choices=list(METODOS), default="tendencia", help="método de proyección")
     ap.add_argument("--presupuesto-meses", type=int, choices=(3, 6, 12), default=12)
+    ap.add_argument("--detalle", choices=("completo", "resumido"), default="completo", help="nivel de detalle del PDF")
     ap.add_argument("--registro", default="registro_corridas.csv")
     args = ap.parse_args()
 
@@ -1577,7 +1994,7 @@ def main():
     clave = args.periodo or periodos_disponibles(datos)[args.tipo][0][1]
     k = calcular_kpis(datos, args.tipo, clave, args.proyeccion or None, args.metodo, args.presupuesto_meses)
     a = generar_analisis(k)
-    construir_pdf(k, a, args.salida, args.logo or buscar_logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")))
+    construir_pdf(k, a, args.salida, args.logo or buscar_logo(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")), detalle=args.detalle)
     registrar_corrida(args.registro, " + ".join(args.fuente), k, a)
     print(f"Reporte generado: {args.salida}  ({k['periodo']['etiqueta']})")
 
